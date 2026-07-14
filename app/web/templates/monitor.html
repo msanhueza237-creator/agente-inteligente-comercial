@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Monitor técnico - Clima Activa{% endblock %}
+{% block content %}
+<h1>Monitor técnico de prospección</h1>
+<p class="subtitle">Las campañas y aprobaciones se administran en el CRM. Este panel muestra únicamente la ejecución del agente.</p>
+
+{% if not runs %}
+<div class="empty-state">
+  No hay ejecuciones locales. El worker quedará a la espera de un trabajo enviado por el CRM.
+</div>
+{% else %}
+<div class="filter-bar">
+  <div style="min-width:360px">
+    <label for="run-picker">Ejecución</label>
+    <select id="run-picker" onchange="location.href='/monitor?run_id='+this.value">
+      {% for run in runs %}
+      <option value="{{ run.id }}" {{ 'selected' if selected and run.id == selected.id else '' }}>
+        {{ run.crm_campaign_id }} · {{ status_labels.get(run.status, run.status) }} · {{ run.created_at.strftime('%d-%m-%Y %H:%M') }}
+      </option>
+      {% endfor %}
+    </select>
+  </div>
+</div>
+
+<div class="stat-grid">
+  <div class="stat-tile"><div class="value">{{ counts.completed }}/{{ counts.total }}</div><div class="label">Tareas completadas</div></div>
+  <div class="stat-tile"><div class="value">{{ counts.pending }}</div><div class="label">Pendientes o activas</div></div>
+  <div class="stat-tile"><div class="value">{{ counts.failed }}</div><div class="label">Tareas fallidas</div></div>
+  <div class="stat-tile"><div class="value">{{ counts.candidates }}</div><div class="label">Candidatos válidos</div></div>
+  <div class="stat-tile"><div class="value">{{ outbox_pending }}</div><div class="label">Mensajes pendientes al CRM</div></div>
+</div>
+
+<h2>Plan de trabajo fuente × keyword × comuna</h2>
+<div class="table-card">
+  <table>
+    <thead><tr><th>Fuente</th><th>Keyword</th><th>Comuna</th><th>Estado</th><th>Intentos</th><th>Aceptados</th><th>Descartados</th></tr></thead>
+    <tbody>
+      {% for task in tasks %}
+      <tr>
+        <td>{{ task.source }}</td><td>{{ task.keyword }}</td><td>{{ task.comuna_name }}</td>
+        <td><span class="badge badge-status-{{ 'good' if task.status == 'completed' else 'warning' }}">{{ status_labels.get(task.status, task.status) }}</span></td>
+        <td>{{ task.attempt_count }}/{{ task.max_attempts }}</td><td>{{ task.results_count }}</td><td>{{ task.rejected_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>Actividad del agente</h2>
+<div class="timeline">
+  {% for event in events %}
+  <div class="timeline-item level-{{ event.level }}">
+    <div class="timeline-time">{{ event.occurred_at.strftime('%d-%m-%Y %H:%M:%S') }}</div>
+    <div><strong>{{ event.stage }}</strong> · {{ event.message }}</div>
+    {% if event.metrics %}<div class="meta">{{ event.metrics }}</div>{% endif %}
+  </div>
+  {% else %}
+  <div class="empty-state">Esta ejecución aún no registra actividad.</div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

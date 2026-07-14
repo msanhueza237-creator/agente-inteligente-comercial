@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Clima Activa - Agente Comercial{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="mark"></span>
+        <span>Clima Activa<br><small style="font-weight:400;color:var(--text-muted)">Agente Comercial</small></span>
+      </div>
+      <nav class="nav-group">
+        <a href="/monitor" class="{{ 'active' if request.url.path == '/monitor' else '' }}">Monitor técnico</a>
+        <a href="/prospects" class="{{ 'active' if request.url.path == '/prospects' else '' }}">Candidatos locales</a>
+      </nav>
+    </aside>
+    <main class="content">
+      {% if request.query_params.get('msg') %}
+        <div class="flash">{{ request.query_params.get('msg') }}</div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Cola de duplicados - Clima Activa{% endblock %}
+{% block content %}
+<h1>Cola de revisión de duplicados</h1>
+<p class="subtitle">{{ candidates|length }} par(es) pendiente(s) de revisión.</p>
+
+{% for c in candidates %}
+<div class="card">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <h3 style="margin:0">Posible duplicado</h3>
+    <span class="badge badge-status-warning">Score {{ "%.0f"|format(c.match_score) }}</span>
+  </div>
+  <div class="compare-grid">
+    <div>
+      <h4>Existente</h4>
+      <p><strong>{{ c.prospect_a.name }}</strong></p>
+      <p class="meta">RUT: {{ c.prospect_a.rut or "-" }}</p>
+      <p class="meta">{{ c.prospect_a.address or "-" }}, {{ c.prospect_a.comuna or "-" }}</p>
+      <p class="meta">{{ c.prospect_a.phone or "-" }} &middot; {{ c.prospect_a.website or "-" }}</p>
+    </div>
+    <div>
+      <h4>Nuevo (candidato)</h4>
+      <p><strong>{{ c.prospect_b.name }}</strong></p>
+      <p class="meta">RUT: {{ c.prospect_b.rut or "-" }}</p>
+      <p class="meta">{{ c.prospect_b.address or "-" }}, {{ c.prospect_b.comuna or "-" }}</p>
+      <p class="meta">{{ c.prospect_b.phone or "-" }} &middot; {{ c.prospect_b.website or "-" }}</p>
+    </div>
+  </div>
+  <div style="display:flex; gap:0.6rem;">
+    <form method="post" action="/dedup/{{ c.id }}/merge">
+      <button type="submit">Fusionar (son el mismo)</button>
+    </form>
+    <form method="post" action="/dedup/{{ c.id }}/reject">
+      <button type="submit" class="secondary">No son duplicados</button>
+    </form>
+  </div>
+</div>
+{% else %}
+<div class="empty-state">No hay pares pendientes de revisión.</div>
+{% endfor %}
+{% endblock %}

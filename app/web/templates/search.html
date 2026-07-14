@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Buscar prospectos - Clima Activa{% endblock %}
+{% block content %}
+<h1>Buscar prospectos en la web</h1>
+<p class="subtitle">
+  Busca empresas en Google Maps y Páginas Amarillas por región/comuna y rubro
+  (ej. "instaladores de aire acondicionado"). Cada resultado se enriquece con
+  datos de contacto de su propio sitio web y pasa por el mismo motor de dedup
+  que la importación de Excel.
+</p>
+
+<script type="application/json" id="region-comuna-data">{{ region_comuna_map | tojson }}</script>
+<div class="card">
+  <form method="post" action="/search" class="stacked">
+    <div>
+      <label for="region">Región</label>
+      <select name="region" id="region" required>
+        <option value="" disabled selected>Selecciona una región</option>
+        {% for r in regions %}
+        <option value="{{ r }}">{{ r }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="comuna">Comuna (opcional, más preciso)</label>
+      <select name="comuna" id="comuna" data-placeholder="Toda la región">
+        <option value="">Toda la región</option>
+      </select>
+    </div>
+    <div>
+      <label for="keyword">Rubro / palabra clave</label>
+      <input type="text" name="keyword" id="keyword" placeholder="ej. instaladores de aire acondicionado" required>
+    </div>
+    <div><button type="submit">Buscar</button></div>
+  </form>
+</div>
+<script src="/static/region-comuna.js"></script>
+
+{% if result %}
+  {% if result.status == "failed" %}
+  <div class="card">
+    <h3>No se pudo completar la búsqueda</h3>
+    <p class="badge badge-status-warning">{{ result.error }}</p>
+    {% if "GOOGLE_MAPS_API_KEY" in (result.error or "") %}
+    <p class="meta">Agrega tu clave de Google Maps Places API a <code>.env</code> (variable <code>GOOGLE_MAPS_API_KEY</code>) y vuelve a intentar.</p>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="card">
+    <h3>Resultado de la búsqueda</h3>
+    <p class="meta">{{ result.query }}</p>
+    {% if result.status == "partial" and result.error %}
+    <p class="badge badge-status-warning">Una fuente falló: {{ result.error }}</p>
+    {% endif %}
+    <div class="stat-grid">
+      <div class="stat-tile"><div class="value">{{ result.stats.found_google }}</div><div class="label">Resultados de Google Maps</div></div>
+      <div class="stat-tile"><div class="value">{{ result.stats.found_paginas_amarillas }}</div><div class="label">Resultados de Páginas Amarillas</div></div>
+      <div class="stat-tile"><div class="value">{{ result.stats.created }}</div><div class="label">Prospectos nuevos</div></div>
+      <div class="stat-tile"><div class="value">{{ result.stats.merged }}</div><div class="label">Fusionados automáticamente</div></div>
+      <div class="stat-tile"><div class="value">{{ result.stats.needs_review }}</div><div class="label">A revisión de duplicados</div></div>
+    </div>
+    {% if result.stats.skipped_budget %}
+    <p style="margin-top:1rem"><span class="badge badge-status-warning">{{ result.stats.skipped_budget }} resultado(s) sin detalle completo por presupuesto diario/mensual de Google Places</span></p>
+    {% endif %}
+    <div style="margin-top:1.25rem; display:flex; gap:0.6rem;">
+      <a href="/prospects" class="btn">Ver prospectos</a>
+      {% if result.stats.needs_review > 0 %}
+      <a href="/dedup" class="btn secondary">Revisar duplicados</a>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+{% endif %}
+{% endblock %}

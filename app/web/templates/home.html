@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Inicio - Clima Activa{% endblock %}
+{% block content %}
+<h1>Panel</h1>
+<p class="subtitle">Estado actual de la base de prospectos.</p>
+
+<div class="stat-grid">
+  <div class="stat-tile">
+    <div class="value">{{ "{:,}".format(stats.total) }}</div>
+    <div class="label">Prospectos totales</div>
+  </div>
+  <div class="stat-tile">
+    <div class="value">{{ "{:,}".format(stats.needs_review) }}</div>
+    <div class="label">Pendientes de revisión de duplicados</div>
+  </div>
+  <div class="stat-tile">
+    <div class="value">{{ "{:,}".format(stats.new) }}</div>
+    <div class="label">Nuevos (sin revisar)</div>
+  </div>
+  <div class="stat-tile">
+    <div class="value">{{ "{:,}".format(stats.approved) }}</div>
+    <div class="label">Aprobados</div>
+  </div>
+</div>
+
+<h2>Prospectos por categoría</h2>
+{% if stats.by_category %}
+{% set max_count = stats.by_category | map(attribute=1) | max %}
+<div class="bar-chart">
+  {% for category, count in stats.by_category %}
+  <div class="bar-row cat-{{ category or 'sinclasificar' }}">
+    <div class="row-label">{{ category_labels.get(category, "Sin clasificar") }}</div>
+    <div class="bar-track"><div class="bar-fill" style="width: {{ (count / max_count * 100) if max_count else 0 }}%"></div></div>
+    <div class="row-value">{{ count }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">Todavía no hay prospectos. <a href="/import">Importa un archivo Excel/CSV</a> para empezar.</div>
+{% endif %}
+{% endblock %}

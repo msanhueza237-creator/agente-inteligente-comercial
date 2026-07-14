@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Prospectos - Clima Activa{% endblock %}
+{% block content %}
+<h1>Prospectos</h1>
+<p class="subtitle">{{ total }} prospecto(s) encontrados.</p>
+
+<script type="application/json" id="region-comuna-data">{{ region_comuna_map | tojson }}</script>
+<form method="get" action="/prospects" class="filter-bar">
+  <div>
+    <label for="region">Región</label>
+    <select name="region" id="region">
+      <option value="">Todas</option>
+      {% for r in filter_options.regions %}
+      <option value="{{ r }}" {% if r == filters.region %}selected{% endif %}>{{ r }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label for="comuna">Comuna</label>
+    <select name="comuna" id="comuna" data-placeholder="Todas" data-selected="{{ filters.comuna or '' }}">
+      <option value="">Todas</option>
+      {% if filters.comuna %}<option value="{{ filters.comuna }}" selected>{{ filters.comuna }}</option>{% endif %}
+    </select>
+  </div>
+  <div>
+    <label for="category">Categoría</label>
+    <select name="category" id="category">
+      <option value="">Todas</option>
+      {% for c in filter_options.categories %}
+      <option value="{{ c }}" {% if c == filters.category %}selected{% endif %}>{{ category_labels.get(c, c) }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label for="status">Estado</label>
+    <select name="status" id="status">
+      <option value="">Todos</option>
+      {% for s in filter_options.statuses %}
+      <option value="{{ s }}" {% if s == filters.status %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Filtrar</button>
+</form>
+
+<div class="table-card">
+<table>
+  <thead>
+    <tr>
+      <th>Nombre</th>
+      <th>Categoría</th>
+      <th>Región / Comuna</th>
+      <th>Teléfono</th>
+      <th>Sitio web</th>
+      <th>Potencial</th>
+      <th>Estado</th>
+      <th>Dedup</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in prospects %}
+    <tr>
+      <td><strong>{{ p.name }}</strong>{% if p.rut %}<br><span class="meta">{{ p.rut }}</span>{% endif %}</td>
+      <td>
+        {% if p.category %}
+        <span class="badge badge-cat cat-{{ p.category.value }}">{{ category_labels.get(p.category.value, p.category.value) }}</span>
+        {% else %}<span class="meta">Sin clasificar</span>{% endif %}
+      </td>
+      <td>{{ p.region or "-" }} / {{ p.comuna or "-" }}</td>
+      <td>{{ p.phone or "-" }}</td>
+      <td>{% if p.website %}<a href="https://{{ p.website }}" target="_blank" rel="noopener">{{ p.website }}</a>{% else %}-{% endif %}</td>
+      <td>
+        {% if p.commercial_potential_level %}
+        <span class="badge badge-level-{{ p.commercial_potential_level.value }}">{{ level_labels.get(p.commercial_potential_level.value, p.commercial_potential_level.value) }}</span>
+        {% else %}-{% endif %}
+      </td>
+      <td>{{ p.status.value }}</td>
+      <td>{{ p.dedup_status.value }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8"><div class="empty-state">No hay prospectos todavía. <a href="/import">Importa un archivo</a>.</div></td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<script src="/static/region-comuna.js"></script>
+{% endblock %}

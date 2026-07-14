@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Importar - Clima Activa{% endblock %}
+{% block content %}
+<h1>Importar Excel/CSV</h1>
+<p class="subtitle">
+  Sube un archivo <code>.xlsx</code> o <code>.csv</code> con prospectos. El sistema
+  mapea automáticamente las columnas (nombre, RUT, teléfono, email, dirección,
+  región, comuna, sitio web, rubro, notas) y detecta duplicados contra la base actual.
+</p>
+
+<div class="card">
+  <form method="post" action="/import" enctype="multipart/form-data" class="stacked">
+    <div>
+      <label for="file">Archivo</label>
+      <input type="file" id="file" name="file" accept=".xlsx,.xls,.csv" required>
+    </div>
+    <div><button type="submit">Importar</button></div>
+  </form>
+</div>
+
+{% if result %}
+<div class="card">
+  <h3>Resultado de la importación</h3>
+  <p class="meta">{{ result.filename }}</p>
+  <div class="stat-grid">
+    <div class="stat-tile">
+      <div class="value">{{ result.row_count }}</div>
+      <div class="label">Filas procesadas</div>
+    </div>
+    <div class="stat-tile">
+      <div class="value">{{ result.stats.created }}</div>
+      <div class="label">Prospectos nuevos</div>
+    </div>
+    <div class="stat-tile">
+      <div class="value">{{ result.stats.merged }}</div>
+      <div class="label">Fusionados automáticamente</div>
+    </div>
+    <div class="stat-tile">
+      <div class="value">{{ result.stats.needs_review }}</div>
+      <div class="label">A revisión de duplicados</div>
+    </div>
+  </div>
+  {% if result.stats.errors %}
+  <p style="margin-top:1rem"><span class="badge badge-status-warning">{{ result.stats.errors }} fila(s) con error</span></p>
+  {% endif %}
+  <div style="margin-top:1.25rem; display:flex; gap:0.6rem;">
+    <a href="/prospects" class="btn">Ver prospectos</a>
+    {% if result.stats.needs_review > 0 %}
+    <a href="/dedup" class="btn secondary">Revisar duplicados</a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

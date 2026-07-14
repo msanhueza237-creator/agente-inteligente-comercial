@@ -1,0 +1,85 @@
+from __future__ import annotations
+
+import re
+
+from unidecode import unidecode
+
+from app.prospecting.contracts import (
+    DerivedProvenance,
+    ProspectCandidate,
+    ProspectingRunSnapshot,
+)
+
+
+def infer_target_type(candidate: ProspectCandidate) -> str:
+    text = " ".join(
+        unidecode(value).lower()
+        for value in (
+            candidate.name,
+            candidate.trade_name,
+            candidate.description,
+            candidate.category,
+        )
+        if value
+    )
+    text = re.sub(r"[_-]+", " ", text)
+    if re.search(r"\b(distribuidor|importador|mayorista)\b", text):
+        return "distribuidor"
+    if re.search(r"\b(tienda|retail|venta al detalle|e commerce)\b", text):
+        return "tienda comercial"
+    if re.search(r"\b(competencia|competidor)\b", text):
+        return "competencia"
+    if re.search(r"\b(industrial|ingenieria|grandes proyectos|proyectos comerciales)\b", text):
+        return "instalador grande"
+    if re.search(
+        r"\b(tecnico|mantencion|mantenimiento|reparacion|instalacion|instalador|contractor|refrigeracion|refrigeration)\b",
+        text,
+    ):
+        return "tecnico"
+    return "otro"
+
+
+def score_candidate(candidate: ProspectCandidate, snapshot: ProspectingRunSnapshot) -> float:
+    score = 35.0
+    if candidate.category in snapshot.campaign.target_types:
+        score += 20
+    if candidate.rut:
+        score += 10
+    if candidate.phone:
+        score += 10
+    if candidate.email:
+        score += 10
+    if candidate.website:
+        score += 5
+    providers = {evidence.provider for evidence in candidate.evidence}
+    score += min(10, len(providers) * 5)
+    return min(100.0, score)
+
+
+def classify_and_score(
+    candidate: ProspectCandidate, snapshot: ProspectingRunSnapshot
+) -> ProspectCandidate:
+    category = infer_target_type(candidate)
+    prepared = candidate.model_copy(update={"category": category})
+    score = score_candidate(prepared, snapshot)
+    provenance = {
+        **candidate.derived_provenance,
+        "category": DerivedProvenance(
+            ruleset="clima_activa_hvac_classification_v1",
+            input_fields=("name", "trade_name", "description"),
+        ),
+        "score": DerivedProvenance(
+            ruleset="clima_activa_commercial_score_v1",
+            input_fields=(
+                "category",
+                "rut",
+                "phone",
+                "email",
+                "website",
+                "evidence",
+            ),
+        ),
+    }
+    return prepared.model_copy(
+        update={"score": score, "derived_provenance": provenance}
+    )
