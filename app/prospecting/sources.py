@@ -24,6 +24,7 @@ from app.normalization.name import normalize_name
 from app.normalization.phone import normalize_phone
 from app.normalization.website import normalize_website
 from app.prospecting.contracts import (
+    DerivedProvenance,
     ProspectCandidate,
     ProspectLocation,
     ProspectingRunSnapshot,
@@ -71,6 +72,73 @@ _TARGET_QUERY_PREFIXES = {
     "competencia": ("empresa",),
     "otro": ("empresa",),
 }
+
+_SPECIALTY_LABELS = {
+    "aire acondicionado": "aire acondicionado",
+    "climatizacion": "climatización",
+    "refrigeracion": "refrigeración",
+    "ventilacion": "ventilación",
+    "calefaccion": "calefacción",
+    "mantencion": "mantención",
+    "mantenimiento": "mantenimiento",
+    "instalacion": "instalación",
+    "servicio tecnico": "servicio técnico",
+    "proyecto hvac": "proyectos HVAC",
+    "camara frigorifica": "cámaras frigoríficas",
+    "extraccion de aire": "extracción de aire",
+    "automatizacion": "automatización",
+    "eficiencia energetica": "eficiencia energética",
+}
+
+
+def _spanish_list(values: Sequence[str]) -> str:
+    prepared = [value for value in values if value]
+    if len(prepared) < 2:
+        return prepared[0] if prepared else ""
+    return f"{', '.join(prepared[:-1])} y {prepared[-1]}"
+
+
+def build_company_summary(candidate: ProspectCandidate) -> str:
+    """Create a cautious Spanish summary using only persisted public signals."""
+
+    comuna = candidate.location.comuna_name or candidate.location.region_name
+    location_text = f" con actividad en {comuna}" if comuna else " en Chile"
+    specialties = tuple(
+        dict.fromkeys(_SPECIALTY_LABELS.get(value.casefold(), value) for value in candidate.specialties)
+    )[:5]
+    brands = tuple(dict.fromkeys(candidate.brands))[:5]
+    category = (candidate.category or "").strip().casefold()
+
+    if specialties:
+        sentences = [
+            f"Empresa del sector climatización y HVAC{location_text}.",
+            f"En sus fuentes públicas se identifican servicios de {_spanish_list(specialties)}.",
+        ]
+    elif category and category != "otro":
+        sentences = [
+            f"Candidato comercial del sector climatización y HVAC{location_text}, clasificado como {category}.",
+            "La actividad específica requiere confirmación cuando no está detallada en su sitio público.",
+        ]
+    else:
+        sentences = [
+            f"Empresa encontrada durante una búsqueda de climatización y HVAC{location_text}.",
+            "No fue posible confirmar públicamente su actividad específica.",
+        ]
+
+    if brands:
+        sentences.append(f"En su información pública se mencionan marcas como {_spanish_list(brands)}.")
+    channels = []
+    if candidate.website:
+        channels.append("sitio web")
+    if candidate.email:
+        channels.append("correo")
+    if candidate.phone:
+        channels.append("teléfono")
+    if candidate.social_media:
+        channels.append("redes sociales")
+    if channels:
+        sentences.append(f"Dispone de contacto mediante {_spanish_list(channels)}.")
+    return " ".join(sentences)[:1200]
 
 
 def build_google_query_plan(
@@ -623,6 +691,33 @@ class AuthorizedSourceExecutor:
         )
         before_evidence = len(prepared.evidence)
         enriched = await self._enrich_official_website(prepared, task)
+        summary_text = build_company_summary(enriched)
+        summary_inputs = tuple(
+            field
+            for field, present in (
+                ("category", bool(enriched.category)),
+                ("location", bool(enriched.location.comuna_name or enriched.location.region_name)),
+                ("specialties", bool(enriched.specialties)),
+                ("brands", bool(enriched.brands)),
+                ("website", bool(enriched.website)),
+                ("email", bool(enriched.email)),
+                ("phone", bool(enriched.phone)),
+                ("social_media", bool(enriched.social_media)),
+            )
+            if present
+        )
+        enriched = enriched.model_copy(
+            update={
+                "company_summary": summary_text,
+                "derived_provenance": {
+                    **enriched.derived_provenance,
+                    "company_summary": DerivedProvenance(
+                        ruleset="company-summary-v1",
+                        input_fields=summary_inputs,
+                    ),
+                },
+            }
+        )
         official_evidence = [item for item in enriched.evidence if item.provider == SourceName.official_website]
         return enriched, {
             "website_found": bool(enriched.website),
@@ -634,6 +729,7 @@ class AuthorizedSourceExecutor:
             "specialties_found": len(enriched.specialties),
             "brands_found": len(enriched.brands),
             "official_pages_with_evidence": len({item.source_url for item in official_evidence if item.source_url}),
+            "company_summary_created": True,
         }
 
     async def _find_official_website(self, candidate: ProspectCandidate) -> str | None:

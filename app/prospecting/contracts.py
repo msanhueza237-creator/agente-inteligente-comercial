@@ -201,6 +201,7 @@ class ProspectCandidate(BaseModel):
     locations: list[ProspectLocation] = Field(default_factory=list, max_length=50)
     category: str | None = Field(default=None, max_length=120)
     description: str | None = Field(default=None, max_length=4000)
+    company_summary: str | None = Field(default=None, max_length=1200)
     social_media: dict[str, str] = Field(default_factory=dict, max_length=10)
     specialties: tuple[str, ...] = Field(default=(), max_length=50)
     brands: tuple[str, ...] = Field(default=(), max_length=50)

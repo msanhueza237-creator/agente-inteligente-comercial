@@ -13,13 +13,34 @@ from app.prospecting.contracts import (
     SourceName,
     Territory,
 )
-from app.prospecting.sources import AuthorizedSourceExecutor, build_google_query_plan
+from app.prospecting.sources import AuthorizedSourceExecutor, build_company_summary, build_google_query_plan
 from app.prospecting.scoring import classify_and_score
 from app.prospecting.store import WorkerTask, scope_candidate_locations
 from app.prospecting.validation import (
     sanitize_unsubstantiated_external_fields,
     validate_candidate,
 )
+
+
+def test_company_summary_uses_evidence_and_marks_unknown_activity() -> None:
+    detailed = ProspectCandidate(
+        name="Clima Andes",
+        location=ProspectLocation(comuna_name="Santiago"),
+        specialties=("instalacion", "mantencion", "aire acondicionado"),
+        brands=("Daikin", "Midea"),
+        website="https://climaandes.cl",
+        phone="+56912345678",
+    )
+    summary = build_company_summary(detailed)
+    assert "instalación" in summary
+    assert "Daikin y Midea" in summary
+    assert "Santiago" in summary
+
+    unknown = ProspectCandidate(
+        name="Nombre poco descriptivo",
+        location=ProspectLocation(comuna_name="Maipú"),
+    )
+    assert "No fue posible confirmar públicamente su actividad específica" in build_company_summary(unknown)
 
 
 @pytest.mark.asyncio
