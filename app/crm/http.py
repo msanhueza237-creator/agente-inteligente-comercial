@@ -26,6 +26,26 @@ from app.prospecting.contracts import (
 CRMTransportError = CRMPortError
 
 
+_SAFE_CRM_VALIDATION_ERRORS = {
+    "Every location requires canonical region_code and comuna_code": "invalid_location_codes",
+    "Candidate location is outside the requested territory": "location_outside_territory",
+    "Candidate requires phone, email or website": "missing_contact",
+    "Evidence contains an invalid or untraceable item": "invalid_evidence",
+    "Candidate provider_ids exceeds allowed size": "invalid_provider_id",
+    "Candidate name lacks matching dated evidence": "name_evidence_mismatch",
+    "Every location requires matching commune evidence": "commune_evidence_mismatch",
+    "Candidate address lacks matching dated evidence": "address_evidence_mismatch",
+    "Candidate RUT is invalid or lacks matching evidence": "invalid_rut",
+    "Candidate trade_name lacks matching evidence": "trade_name_evidence_mismatch",
+    "Candidate description lacks matching evidence": "description_evidence_mismatch",
+    "Candidate phone is invalid or lacks matching evidence": "invalid_phone",
+    "Candidate email lacks matching evidence": "email_evidence_mismatch",
+    "Candidate website is invalid or lacks matching evidence": "invalid_website",
+    "Candidate requires a valid evidenced contact": "invalid_contact",
+    "Candidate score must be between 0 and 100": "invalid_score",
+}
+
+
 def business_payload_hash(payload: dict) -> str:
     """Hash the immutable business body exactly as the CRM idempotency layer does.
 
@@ -99,6 +119,9 @@ class HttpCRMPort:
             return
         # Never include the body: upstream errors may echo contacts or secrets.
         message = f"CRM returned status {status}"
+        diagnostic = HttpCRMPort._safe_error_diagnostic(response)
+        if diagnostic:
+            message = f"{message} ({diagnostic})"
         if status in {401, 403, 404, 410, 423}:
             raise CRMLeaseLostError(message)
         if status == 409:
@@ -106,6 +129,24 @@ class HttpCRMPort:
         if status in {425, 429} or status >= 500:
             raise CRMRetryableError(message)
         raise CRMPermanentError(message)
+
+    @staticmethod
+    def _safe_error_diagnostic(response: httpx.Response) -> str | None:
+        """Return only allow-listed machine diagnostics, never upstream data."""
+
+        try:
+            payload = response.json()
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        code = payload.get("code")
+        safe_code = str(code) if isinstance(code, str) and code.isalnum() else None
+        error = payload.get("error")
+        label = _SAFE_CRM_VALIDATION_ERRORS.get(error) if isinstance(error, str) else None
+        if safe_code and label:
+            return f"{safe_code}:{label}"
+        return label or safe_code
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         try:

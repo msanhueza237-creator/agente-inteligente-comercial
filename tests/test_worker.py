@@ -263,9 +263,7 @@ async def test_candidate_cap_completes_and_reports_limit_reached() -> None:
 async def test_cap_uses_crm_ack_so_remote_duplicate_does_not_hide_new_candidate() -> None:
     crm = FakeCRMPort()
     store = MemoryWorkerStore()
-    await crm.enqueue(
-        build_snapshot(sources=(SourceName.google_places,), max_candidates=1000)
-    )
+    await crm.enqueue(build_snapshot(sources=(SourceName.google_places,), max_candidates=1000))
     remote = await crm.inspect_run("run-worker")
     duplicate = qualified_candidate(
         candidate_id="remote-duplicate",
@@ -426,9 +424,7 @@ class TransientCandidateCRM(FakeCRMPort):
         if self.fail_once:
             self.fail_once = False
             raise CRMRetryableError("CRM returned status 425")
-        return await super().upsert_candidates(
-            run_id, lease_token, candidates, idempotency_key
-        )
+        return await super().upsert_candidates(run_id, lease_token, candidates, idempotency_key)
 
 
 class TransientTaskCompletedCRM(FakeCRMPort):
@@ -437,14 +433,10 @@ class TransientTaskCompletedCRM(FakeCRMPort):
         self.fail_completed_once = True
 
     async def append_events(self, run_id, lease_token, events, idempotency_key):
-        if self.fail_completed_once and any(
-            event.stage == "task_completed" for event in events
-        ):
+        if self.fail_completed_once and any(event.stage == "task_completed" for event in events):
             self.fail_completed_once = False
             raise CRMRetryableError("CRM returned status 500")
-        return await super().append_events(
-            run_id, lease_token, events, idempotency_key
-        )
+        return await super().append_events(run_id, lease_token, events, idempotency_key)
 
 
 class CommitThenLoseCompleteResponseCRM(FakeCRMPort):
@@ -502,9 +494,9 @@ async def test_outbox_recovers_without_repeating_completed_source_query() -> Non
     remote = await crm.inspect_run("run-worker")
     remote.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     for message_id in store.runs["run-worker"].outbox_available_at:
-        store.runs["run-worker"].outbox_available_at[message_id] = (
-            datetime.now(timezone.utc) - timedelta(seconds=1)
-        )
+        store.runs["run-worker"].outbox_available_at[message_id] = datetime.now(
+            timezone.utc
+        ) - timedelta(seconds=1)
     await worker.poll_once()
 
     assert remote.status == RunStatus.completed
@@ -544,9 +536,7 @@ async def test_pending_task_completed_event_prevents_source_reexecution() -> Non
 
     remote.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     for message_id in local.outbox_available_at:
-        local.outbox_available_at[message_id] = (
-            datetime.now(timezone.utc) - timedelta(seconds=1)
-        )
+        local.outbox_available_at[message_id] = datetime.now(timezone.utc) - timedelta(seconds=1)
     await worker.poll_once()
 
     assert remote.status == RunStatus.completed
@@ -710,7 +700,7 @@ class PermanentCandidateCRM(FakeCRMPort):
 
 
 @pytest.mark.asyncio
-async def test_permanent_candidate_delivery_failure_dead_letters_and_never_completes() -> None:
+async def test_single_invalid_candidate_is_discarded_without_dead_letter() -> None:
     crm = PermanentCandidateCRM()
     store = MemoryWorkerStore()
     source = StaticSourceExecutor([qualified_candidate()])
@@ -724,20 +714,63 @@ async def test_permanent_candidate_delivery_failure_dead_letters_and_never_compl
 
     await worker.poll_once()
     remote = await crm.inspect_run("run-worker")
-    assert remote.status == RunStatus.running
-    assert len(remote.candidates) == 0
-
-    remote.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-    await worker.poll_once()
 
     assert remote.status == RunStatus.partial
     assert remote.status != RunStatus.completed
     assert len(remote.candidates) == 0
     assert len(source.calls) == 1
     assert remote.report is not None
-    assert remote.report.stats["dead_letters"] == 1
-    assert remote.report.stats["delivery_failed"] is True
-    assert "limit_reached" not in remote.report.stats
+    assert remote.report.stats["dead_letters"] == 0
+    assert remote.report.stats["rejected_invalid"] == 1
+    assert "delivery_failed" not in remote.report.stats
+
+
+class SelectiveCandidateCRM(FakeCRMPort):
+    async def upsert_candidates(self, run_id, lease_token, candidates, idempotency_key):
+        if any(
+            candidate.provider_ids.get("google_places") == "place-invalid"
+            for candidate in candidates
+        ):
+            raise CRMPermanentError("CRM returned status 400 (22023:invalid_phone)")
+        return await super().upsert_candidates(run_id, lease_token, candidates, idempotency_key)
+
+
+@pytest.mark.asyncio
+async def test_invalid_candidate_isolated_while_valid_candidate_is_delivered() -> None:
+    crm = SelectiveCandidateCRM()
+    store = MemoryWorkerStore()
+    source = StaticSourceExecutor(
+        [
+            qualified_candidate(
+                url="https://clima-polar.cl",
+                provider_id="place-invalid",
+            ),
+            qualified_candidate(
+                name=f"{qualified_candidate().name} Andes",
+                url="https://refrigeracion-andes.cl",
+                provider_id="place-valid",
+            ),
+        ]
+    )
+    await crm.enqueue(build_snapshot(sources=(SourceName.google_places,)))
+    worker = ProspectingWorker(
+        crm,
+        store,
+        source,
+        config=WorkerConfig(heartbeat_seconds=60),
+    )
+
+    await worker.poll_once()
+    remote = await crm.inspect_run("run-worker")
+
+    assert remote.status == RunStatus.partial
+    assert len(remote.candidates) == 1
+    assert next(iter(remote.candidates.values())).provider_ids["google_places"] == "place-valid"
+    assert len(source.calls) == 1
+    assert remote.report is not None
+    assert remote.report.stats["crm_accepted"] == 1
+    assert remote.report.stats["rejected_invalid"] == 1
+    assert remote.report.stats["dead_letters"] == 0
 
 
 @pytest.mark.asyncio
@@ -763,8 +796,8 @@ async def test_retryable_outbox_message_survives_more_than_max_attempts_and_reco
 
     assert (await store.summary(run_id)).dead_letters == 0
     assert await store.has_pending_outbox(run_id)
-    store.runs[run_id].outbox_available_at[message.id] = (
-        datetime.now(timezone.utc) - timedelta(seconds=1)
+    store.runs[run_id].outbox_available_at[message.id] = datetime.now(timezone.utc) - timedelta(
+        seconds=1
     )
     assert (await store.get_outbox(run_id))[0].id == message.id
     await store.mark_outbox_delivered(message.id)
@@ -778,15 +811,11 @@ async def test_global_dedup_never_leaks_evidence_from_another_run() -> None:
     campaign_a = build_snapshot(
         sources=(SourceName.brave_search, SourceName.official_website)
     ).campaign.model_copy(update={"crm_campaign_id": "campaign-a"})
-    campaign_b = build_snapshot(
-        sources=(SourceName.google_places,)
-    ).campaign.model_copy(update={"crm_campaign_id": "campaign-b"})
-    snapshot_a = build_snapshot().model_copy(
-        update={"crm_run_id": "run-a", "campaign": campaign_a}
+    campaign_b = build_snapshot(sources=(SourceName.google_places,)).campaign.model_copy(
+        update={"crm_campaign_id": "campaign-b"}
     )
-    snapshot_b = build_snapshot().model_copy(
-        update={"crm_run_id": "run-b", "campaign": campaign_b}
-    )
+    snapshot_a = build_snapshot().model_copy(update={"crm_run_id": "run-a", "campaign": campaign_a})
+    snapshot_b = build_snapshot().model_copy(update={"crm_run_id": "run-b", "campaign": campaign_b})
     await crm.enqueue(snapshot_a)
     await crm.enqueue(snapshot_b)
     claim_a = await crm.claim_run("worker-a")
@@ -820,9 +849,7 @@ async def test_global_dedup_never_leaks_evidence_from_another_run() -> None:
     assert saved_a[0].import_eligible
     assert not saved_b[0].import_eligible
     assert saved_b[0].provider_ids == {"google_places": "google-run-b"}
-    assert {item.provider for item in saved_b[0].evidence} == {
-        SourceName.google_places
-    }
+    assert {item.provider for item in saved_b[0].evidence} == {SourceName.google_places}
 
 
 @pytest.mark.asyncio

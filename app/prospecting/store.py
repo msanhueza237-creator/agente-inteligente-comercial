@@ -149,6 +149,7 @@ class RunSummary:
     dead_letters: int = 0
     crm_accepted: int = 0
     rejected_limit: int = 0
+    rejected_invalid: int = 0
     budget_limited: int = 0
 
     @property
@@ -224,6 +225,10 @@ class WorkerStore(Protocol):
     ) -> None: ...
 
     async def mark_outbox_failed(self, message_id: str, error: str, *, retryable: bool) -> bool: ...
+
+    async def split_candidate_outbox(self, message_id: str, error: str) -> bool: ...
+
+    async def discard_candidate_outbox(self, message_id: str, error: str) -> bool: ...
 
     async def record_candidate_ack(
         self, run_id: str, message_id: str, ack: CandidateBatchAck
@@ -1024,6 +1029,65 @@ class SQLWorkerStore:
             row.available_at = now_utc() + timedelta(seconds=retry_delay)
             return dead
 
+    async def split_candidate_outbox(self, message_id: str, error: str) -> bool:
+        """Atomically replace a rejected candidate batch with two smaller batches."""
+
+        async with self._sessions() as session, session.begin():
+            row = await session.get(CRMOutboxMessage, uuid.UUID(message_id), with_for_update=True)
+            if (
+                row is None
+                or row.kind != "candidates"
+                or row.status not in {"queued", "dead"}
+                or not isinstance(row.payload, list)
+                or len(row.payload) < 2
+            ):
+                return False
+
+            midpoint = len(row.payload) // 2
+            parts = (row.payload[:midpoint], row.payload[midpoint:])
+            for index, payload in enumerate(parts):
+                key = f"{row.id}:split:{index}"
+                exists = await session.scalar(
+                    select(CRMOutboxMessage.id).where(CRMOutboxMessage.idempotency_key == key)
+                )
+                if exists is None:
+                    session.add(
+                        CRMOutboxMessage(
+                            run_id=row.run_id,
+                            kind="candidates",
+                            idempotency_key=key,
+                            payload=payload,
+                        )
+                    )
+
+            row.status = "split"
+            row.delivered_at = now_utc()
+            row.last_error = error[:2000]
+            return True
+
+    async def discard_candidate_outbox(self, message_id: str, error: str) -> bool:
+        """Audit and skip one CRM-rejected candidate without stopping the run."""
+
+        async with self._sessions() as session, session.begin():
+            row = await session.get(CRMOutboxMessage, uuid.UUID(message_id), with_for_update=True)
+            if (
+                row is None
+                or row.kind != "candidates"
+                or row.status not in {"queued", "dead"}
+                or not isinstance(row.payload, list)
+                or len(row.payload) != 1
+            ):
+                return False
+            run = await session.get(ProspectingRun, row.run_id, with_for_update=True)
+            row.status = "discarded"
+            row.delivered_at = now_utc()
+            row.last_error = error[:2000]
+            if run is not None:
+                stats = dict(run.stats or {})
+                stats["rejected_invalid"] = int(stats.get("rejected_invalid", 0)) + 1
+                run.stats = stats
+            return True
+
     async def record_candidate_ack(
         self, run_id: str, message_id: str, ack: CandidateBatchAck
     ) -> None:
@@ -1089,6 +1153,7 @@ class SQLWorkerStore:
                 dead_letters=dead_letters or 0,
                 crm_accepted=int((run.stats or {}).get("crm_accepted", 0)) if run else 0,
                 rejected_limit=int((run.stats or {}).get("rejected_limit", 0)) if run else 0,
+                rejected_invalid=int((run.stats or {}).get("rejected_invalid", 0)) if run else 0,
                 budget_limited=budget_limited or 0,
             )
 
@@ -1130,6 +1195,7 @@ class _MemoryRun:
     remote_candidates_baseline: int = 0
     crm_accepted: int = 0
     rejected_limit: int = 0
+    rejected_invalid: int = 0
     status: str = "running"
     crm_worker_id: str | None = None
     crm_lease_token: str | None = None
@@ -1477,6 +1543,57 @@ class MemoryWorkerStore:
                 return dead
         return False
 
+    async def split_candidate_outbox(self, message_id: str, error: str) -> bool:
+        del error
+        async with self._lock:
+            for run in self.runs.values():
+                message = run.outbox.get(message_id)
+                if (
+                    message is None
+                    or message.kind != "candidates"
+                    or message_id in run.outbox_delivered
+                    or not isinstance(message.payload, list)
+                    or len(message.payload) < 2
+                ):
+                    continue
+                midpoint = len(message.payload) // 2
+                for index, payload in enumerate(
+                    (message.payload[:midpoint], message.payload[midpoint:])
+                ):
+                    key = f"{message.id}:split:{index}"
+                    run.outbox.setdefault(
+                        key,
+                        OutboxEnvelope(
+                            id=key,
+                            run_id=message.run_id,
+                            kind="candidates",
+                            idempotency_key=key,
+                            payload=payload,
+                        ),
+                    )
+                run.outbox_delivered.add(message_id)
+                run.outbox_dead.discard(message_id)
+                return True
+        return False
+
+    async def discard_candidate_outbox(self, message_id: str, error: str) -> bool:
+        del error
+        async with self._lock:
+            for run in self.runs.values():
+                message = run.outbox.get(message_id)
+                if (
+                    message is None
+                    or message.kind != "candidates"
+                    or not isinstance(message.payload, list)
+                    or len(message.payload) != 1
+                ):
+                    continue
+                run.outbox_delivered.add(message_id)
+                run.outbox_dead.discard(message_id)
+                run.rejected_invalid += 1
+                return True
+        return False
+
     async def record_candidate_ack(
         self, run_id: str, message_id: str, ack: CandidateBatchAck
     ) -> None:
@@ -1520,6 +1637,7 @@ class MemoryWorkerStore:
                 dead_letters=len(run.outbox_dead),
                 crm_accepted=run.crm_accepted,
                 rejected_limit=run.rejected_limit,
+                rejected_invalid=run.rejected_invalid,
                 budget_limited=sum(
                     1
                     for message in run.outbox.values()

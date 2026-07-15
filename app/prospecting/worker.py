@@ -121,7 +121,7 @@ class ProspectingWorker:
                     await self.store.cancel_tasks(local_run_id)
                     terminal = (
                         RunStatus.partial
-                        if summary.failed or summary.dead_letters
+                        if summary.failed or summary.dead_letters or summary.rejected_invalid
                         else RunStatus.completed
                     )
                     await self._complete(
@@ -142,7 +142,12 @@ class ProspectingWorker:
                         continue
                     status = (
                         RunStatus.partial
-                        if summary.failed or summary.dead_letters or summary.budget_limited
+                        if (
+                            summary.failed
+                            or summary.dead_letters
+                            or summary.rejected_invalid
+                            or summary.budget_limited
+                        )
                         else RunStatus.completed
                     )
                     await self._complete(local_run_id, claim, status)
@@ -406,31 +411,53 @@ class ProspectingWorker:
         return f"{type(exc).__name__}: {message}"[:1000]
 
     async def _deliver_outbox(self, local_run_id: str, claim: ClaimedRun) -> bool:
-        messages = await self.store.get_outbox(local_run_id)
-        for message in messages:
-            try:
-                ack = await self._deliver_message(message, claim)
-            except CRMLeaseLostError:
-                return False
-            except CRMRetryableError as exc:
-                await self.store.mark_outbox_failed(
-                    message.id, self._safe_error(exc), retryable=True
-                )
-                return False
-            except (CRMIdempotencyConflict, CRMPermanentError, ValueError) as exc:
-                await self.store.mark_outbox_failed(
-                    message.id, self._safe_error(exc), retryable=False
-                )
-                return False
-            except Exception as exc:  # noqa: BLE001 - durable outbox retries on next claim
-                await self.store.mark_outbox_failed(
-                    message.id, self._safe_error(exc), retryable=True
-                )
-                return False
-            if ack is not None:
-                await self.store.record_candidate_ack(local_run_id, message.id, ack)
-            await self._finalize_outbox_delivery(local_run_id, message)
-        return not await self.store.has_pending_outbox(local_run_id)
+        while True:
+            messages = await self.store.get_outbox(local_run_id)
+            if not messages:
+                return not await self.store.has_pending_outbox(local_run_id)
+
+            for message in messages:
+                try:
+                    ack = await self._deliver_message(message, claim)
+                except CRMLeaseLostError:
+                    return False
+                except CRMRetryableError as exc:
+                    await self.store.mark_outbox_failed(
+                        message.id, self._safe_error(exc), retryable=True
+                    )
+                    return False
+                except (CRMPermanentError, ValueError) as exc:
+                    safe_error = self._safe_error(exc)
+                    if message.kind == "candidates" and isinstance(message.payload, list):
+                        if len(message.payload) > 1:
+                            if await self.store.split_candidate_outbox(message.id, safe_error):
+                                logger.warning(
+                                    "CRM rejected candidate batch; split for isolation size=%s",
+                                    len(message.payload),
+                                )
+                                continue
+                        elif len(message.payload) == 1:
+                            if await self.store.discard_candidate_outbox(message.id, safe_error):
+                                logger.warning(
+                                    "CRM rejected one candidate; discarded safely error=%s",
+                                    safe_error,
+                                )
+                                continue
+                    await self.store.mark_outbox_failed(message.id, safe_error, retryable=False)
+                    return False
+                except CRMIdempotencyConflict as exc:
+                    await self.store.mark_outbox_failed(
+                        message.id, self._safe_error(exc), retryable=False
+                    )
+                    return False
+                except Exception as exc:  # noqa: BLE001 - durable outbox retries on next claim
+                    await self.store.mark_outbox_failed(
+                        message.id, self._safe_error(exc), retryable=True
+                    )
+                    return False
+                if ack is not None:
+                    await self.store.record_candidate_ack(local_run_id, message.id, ack)
+                await self._finalize_outbox_delivery(local_run_id, message)
 
     async def _reconcile_terminal_outbox(self) -> bool:
         replays = await self.store.pending_terminal_replays()

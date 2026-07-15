@@ -145,6 +145,34 @@ async def test_http_port_does_not_echo_upstream_body_in_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_port_exposes_only_allowlisted_candidate_validation_diagnostic() -> None:
+    raw_error = "Candidate phone is invalid or lacks matching evidence"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/claim"):
+            return httpx.Response(200, json={"run": None})
+        return httpx.Response(400, json={"error": raw_error, "code": "22023"})
+
+    port = HttpCRMPort(
+        base_url="https://crm.test/crm-agent",
+        api_key="ca_live_test",
+        transport=httpx.MockTransport(handler),
+    )
+    await port.claim_run("worker-http")
+
+    with pytest.raises(CRMPermanentError) as error:
+        await port.upsert_candidates(
+            RUN_ID,
+            "lease-1",
+            [ProspectCandidate(name="Clima", location=ProspectLocation(comuna_name="Santiago"))],
+            "idem-validation",
+        )
+
+    assert "22023:invalid_phone" in str(error.value)
+    assert raw_error not in str(error.value)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [401, 403, 404, 410, 423])
 async def test_http_heartbeat_treats_auth_or_lease_rejection_as_lost(status) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -238,9 +266,7 @@ async def test_http_outbox_business_payload_stays_equal_with_a_new_lease() -> No
     first = await port.claim_run("worker-http")
     await port.upsert_candidates(RUN_ID, first.lease_token, [candidate], "business-key-http")
     second = await port.claim_run("worker-http")
-    ack = await port.upsert_candidates(
-        RUN_ID, second.lease_token, [candidate], "business-key-http"
-    )
+    ack = await port.upsert_candidates(RUN_ID, second.lease_token, [candidate], "business-key-http")
 
     first_body = json.loads(candidate_requests[0].content)
     second_body = json.loads(candidate_requests[1].content)
@@ -323,9 +349,9 @@ async def test_http_replays_same_idempotent_business_payload_after_response_loss
     second_body = json.loads(candidate_requests[1].content)
     assert business_payload_hash(first_body) == business_payload_hash(second_body)
     assert first_body["lease_token"] != second_body["lease_token"]
-    assert {
-        request.headers["Idempotency-Key"] for request in candidate_requests
-    } == {"response-lost-key"}
+    assert {request.headers["Idempotency-Key"] for request in candidate_requests} == {
+        "response-lost-key"
+    }
 
 
 @pytest.mark.asyncio
