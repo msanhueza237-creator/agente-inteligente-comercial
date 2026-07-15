@@ -16,6 +16,7 @@ from app.crm.port import (
 )
 from app.prospecting.contracts import (
     CandidateBatchAck,
+    ClaimedEnrichment,
     ClaimedRun,
     CompletionReport,
     ProspectCandidate,
@@ -170,6 +171,63 @@ class HttpCRMPort:
         if payload.get("run") is None and "run" in payload:
             return None
         return ClaimedRun.model_validate(payload)
+
+    async def claim_enrichment(
+        self, worker_id: str, lease_seconds: int = 300
+    ) -> ClaimedEnrichment | None:
+        self._worker_id = worker_id
+        response = await self._request(
+            "POST",
+            "prospecting-enrichment/claim",
+            json={"worker_id": worker_id, "lease_seconds": lease_seconds},
+            headers={"Idempotency-Key": str(uuid.uuid4())},
+        )
+        self._ensure_success(response)
+        payload = self._unwrap(response.json())
+        job = payload.get("job")
+        if not isinstance(job, dict):
+            return None
+        return ClaimedEnrichment.model_validate(
+            {
+                "job_id": job.get("id"),
+                "run_id": job.get("run_id"),
+                "candidate_relation_id": job.get("candidate_relation_id"),
+                "candidate": payload.get("candidate"),
+                "lease_token": payload.get("lease_token"),
+                "lease_expires_at": payload.get("lease_expires_at"),
+            }
+        )
+
+    async def complete_enrichment(
+        self,
+        claim: ClaimedEnrichment,
+        candidate: ProspectCandidate,
+        summary: dict,
+        idempotency_key: str,
+    ) -> None:
+        await self._write(
+            f"/prospecting-enrichment/{claim.job_id}/complete",
+            {
+                "worker_id": self._require_worker_id(),
+                "lease_token": claim.lease_token,
+                "candidate": candidate.model_dump(mode="json"),
+                "summary": summary,
+            },
+            idempotency_key,
+        )
+
+    async def fail_enrichment(
+        self, claim: ClaimedEnrichment, error: str, idempotency_key: str
+    ) -> None:
+        await self._write(
+            f"/prospecting-enrichment/{claim.job_id}/fail",
+            {
+                "worker_id": self._require_worker_id(),
+                "lease_token": claim.lease_token,
+                "error": error[:4000],
+            },
+            idempotency_key,
+        )
 
     async def claim_integration_check(self, worker_id: str) -> dict | None:
         response = await self._request(

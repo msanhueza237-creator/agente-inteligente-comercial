@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
+import json
+import uuid
 
 import httpx
 from bs4 import BeautifulSoup
@@ -557,11 +559,23 @@ class AuthorizedSourceExecutor:
         phone = normalize_phone(enrichment.get("phone"))
         add("email", email)
         add("phone", phone)
+        social_media = enrichment.get("social_media") or {}
+        specialties = tuple(enrichment.get("specialties") or ())
+        brands = tuple(enrichment.get("brands") or ())
+        for platform, url in social_media.items():
+            add(f"social_media.{platform}", url, url=source_url)
+        if specialties:
+            add("specialties", json.dumps(specialties, ensure_ascii=False), url=source_url)
+        if brands:
+            add("brands", json.dumps(brands, ensure_ascii=False), url=source_url)
         canonical = prepared_locations[0]
         return candidate.model_copy(
             update={
                 "email": email or candidate.email,
                 "phone": phone or candidate.phone,
+                "social_media": {**candidate.social_media, **social_media},
+                "specialties": tuple(dict.fromkeys((*candidate.specialties, *specialties))),
+                "brands": tuple(dict.fromkeys((*candidate.brands, *brands))),
                 "location": canonical,
                 "locations": prepared_locations,
                 "provider_ids": {
@@ -571,6 +585,78 @@ class AuthorizedSourceExecutor:
                 "evidence": evidence,
             }
         )
+
+    async def enrich_existing(self, candidate: ProspectCandidate, run_id: str) -> tuple[ProspectCandidate, dict]:
+        """Investigate one persisted candidate without rerunning discovery."""
+
+        prepared = candidate
+        website_discovered = False
+        if not self._is_official_website_candidate(prepared):
+            website = await self._find_official_website(prepared)
+            if website:
+                provider_id = normalize_website(website)
+                evidence = [
+                    *prepared.evidence,
+                    SourceEvidence(
+                        provider=SourceName.brave_search,
+                        source_url=website,
+                        provider_record_id=website,
+                        field="website",
+                        value=website,
+                    ),
+                ]
+                prepared = prepared.model_copy(
+                    update={
+                        "website": website,
+                        "provider_ids": {**prepared.provider_ids, "brave_search": website, **({"official_website": provider_id} if provider_id else {})},
+                        "evidence": evidence,
+                    }
+                )
+                website_discovered = True
+
+        location = prepared.location
+        task = WorkerTask(
+            id=f"enrichment-{uuid.uuid4()}", run_id=run_id, source=SourceName.official_website,
+            keyword=prepared.name, region_code=location.region_code or "",
+            region_name=location.region_name or "", comuna_code=location.comuna_code or "",
+            comuna_name=location.comuna_name or "", max_results=1, attempt_count=0, max_attempts=3,
+        )
+        before_evidence = len(prepared.evidence)
+        enriched = await self._enrich_official_website(prepared, task)
+        official_evidence = [item for item in enriched.evidence if item.provider == SourceName.official_website]
+        return enriched, {
+            "website_found": bool(enriched.website),
+            "website_discovered_by_brave": website_discovered,
+            "official_fields_added": max(0, len(enriched.evidence) - before_evidence),
+            "emails_found": int(bool(enriched.email)),
+            "phones_found": int(bool(enriched.phone)),
+            "social_profiles_found": len(enriched.social_media),
+            "specialties_found": len(enriched.specialties),
+            "brands_found": len(enriched.brands),
+            "official_pages_with_evidence": len({item.source_url for item in official_evidence if item.source_url}),
+        }
+
+    async def _find_official_website(self, candidate: ProspectCandidate) -> str | None:
+        if not self.settings.brave_search_api_key:
+            return None
+        location = candidate.location.comuna_name or candidate.location.region_name or "Chile"
+        query = f'"{candidate.name}" {location} sitio oficial'
+        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+            response = await client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={"Accept": "application/json", "X-Subscription-Token": self.settings.brave_search_api_key},
+                params={"q": query, "count": 5, "country": "cl", "search_lang": "es", "safesearch": "moderate"},
+            )
+        if response.status_code != 200:
+            raise RuntimeError(f"Brave Search failed with status {response.status_code}")
+        for result in response.json().get("web", {}).get("results", []):
+            url = result.get("url")
+            if not url:
+                continue
+            probe = candidate.model_copy(update={"website": url, "provider_ids": {"brave_search": url}})
+            if self._is_official_website_candidate(probe):
+                return url
+        return None
 
     @staticmethod
     def _is_official_website_candidate(candidate: ProspectCandidate) -> bool:
@@ -618,6 +704,10 @@ class StaticSourceExecutor:
     def __init__(self, candidates: list[ProspectCandidate] | None = None):
         self.candidates = candidates or []
         self.calls: list[WorkerTask] = []
+
+    async def enrich_existing(self, candidate: ProspectCandidate, run_id: str) -> tuple[ProspectCandidate, dict]:
+        del run_id
+        return candidate, {"website_found": bool(candidate.website)}
 
     async def search(
         self, task: WorkerTask, snapshot: ProspectingRunSnapshot

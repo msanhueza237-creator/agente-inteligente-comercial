@@ -173,3 +173,23 @@ async def test_enrichment_reads_structured_identity_and_address_from_contact_pag
             "source_url": "https://climaandes.cl/contacto",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_enrichment_crawls_bounded_service_pages_and_extracts_brands() -> None:
+    homepage = b'<a href="/servicios">Servicios</a><a href="/nosotros">Nosotros</a>'
+    services = "Instalacion y mantencion de aire acondicionado Daikin y Carrier".encode()
+    about = "Especialistas en refrigeracion y ventilacion industrial".encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        content = services if request.url.path == "/servicios" else about if request.url.path == "/nosotros" else homepage
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, content=content)
+
+    client = SecureWebClient(resolver=public_resolver, transport=httpx.MockTransport(handler), min_host_interval=0)
+    result = await enrich_from_website("https://empresa-hvac.cl", client=client)
+
+    assert {"aire acondicionado", "mantencion", "instalacion", "refrigeracion", "ventilacion"} <= set(result["specialties"])
+    assert {"Daikin", "Carrier"} <= set(result["brands"])
+    assert len(result["pages_visited"]) == 3

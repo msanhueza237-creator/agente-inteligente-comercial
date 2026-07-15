@@ -5,6 +5,7 @@ from typing import Protocol
 
 from app.prospecting.contracts import (
     CandidateBatchAck,
+    ClaimedEnrichment,
     ClaimedRun,
     CompletionReport,
     ProspectCandidate,
@@ -49,6 +50,16 @@ class CRMPort(Protocol):
     """
 
     async def claim_run(self, worker_id: str, lease_seconds: int = 120) -> ClaimedRun | None: ...
+
+    async def claim_enrichment(self, worker_id: str, lease_seconds: int = 300) -> ClaimedEnrichment | None: ...
+
+    async def complete_enrichment(
+        self, claim: ClaimedEnrichment, candidate: ProspectCandidate, summary: dict, idempotency_key: str
+    ) -> None: ...
+
+    async def fail_enrichment(
+        self, claim: ClaimedEnrichment, error: str, idempotency_key: str
+    ) -> None: ...
 
     async def heartbeat(
         self, run_id: str, lease_token: str, lease_seconds: int = 120

@@ -119,6 +119,16 @@ class FakeCRMPort:
                     candidates_found=len(run.candidates),
                     tasks=tuple(run.tasks),
                 )
+
+    async def claim_enrichment(self, worker_id: str, lease_seconds: int = 300):
+        del worker_id, lease_seconds
+        return None
+
+    async def complete_enrichment(self, claim, candidate, summary, idempotency_key):
+        del claim, candidate, summary, idempotency_key
+
+    async def fail_enrichment(self, claim, error, idempotency_key):
+        del claim, error, idempotency_key
         return None
 
     async def heartbeat(

@@ -71,9 +71,38 @@ class ProspectingWorker:
         reconciled_terminal = await self._reconcile_terminal_outbox()
         claim = await self.crm.claim_run(self.worker_id, self.config.lease_seconds)
         if claim is None:
-            return reconciled_terminal
+            claim_enrichment = getattr(self.crm, "claim_enrichment", None)
+            if claim_enrichment is None:
+                return reconciled_terminal
+            enrichment = await claim_enrichment(self.worker_id, 300)
+            if enrichment is None:
+                return reconciled_terminal
+            await self._process_enrichment(enrichment)
+            return True
         await self._process_claim(claim)
         return True
+
+    async def _process_enrichment(self, claim) -> None:
+        try:
+            enrich = getattr(self.sources, "enrich_existing", None)
+            if enrich is None:
+                raise RuntimeError("The configured source executor cannot enrich existing candidates")
+            candidate, summary = await enrich(claim.candidate, claim.run_id)
+            await self.crm.complete_enrichment(
+                claim,
+                candidate,
+                summary,
+                f"enrichment:{claim.job_id}:attempt:{claim.lease_token}:complete",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - CRM owns bounded retries
+            logger.warning("candidate enrichment failed job=%s error=%s", claim.job_id, type(exc).__name__)
+            await self.crm.fail_enrichment(
+                claim,
+                f"{type(exc).__name__}: {str(exc)[:1000]}",
+                f"enrichment:{claim.job_id}:attempt:{claim.lease_token}:fail",
+            )
 
     async def run_forever(self) -> None:
         while True:

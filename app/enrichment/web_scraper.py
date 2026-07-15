@@ -30,6 +30,17 @@ _SOCIAL_DOMAINS = {
     "linkedin": "linkedin.com",
     "whatsapp": "wa.me",
 }
+_PAGE_TOKENS = ("contact", "contacto", "ubicacion", "sucursal", "nosotros", "empresa", "servicio", "solucion", "producto", "marca")
+_SPECIALTY_TERMS = (
+    "aire acondicionado", "climatizacion", "refrigeracion", "ventilacion", "calefaccion",
+    "mantencion", "mantenimiento", "instalacion", "servicio tecnico", "proyecto hvac",
+    "camara frigorifica", "extraccion de aire", "automatizacion", "eficiencia energetica",
+)
+_BRAND_TERMS = (
+    "Daikin", "Midea", "Carrier", "Trane", "York", "LG", "Samsung", "Mitsubishi",
+    "Fujitsu", "Anwo", "Khöne", "Hisense", "Bosch", "Rheem", "Honeywell", "Danfoss",
+    "Copeland", "Emerson", "Sporlan", "Sodeca", "Systemair", "Trox",
+)
 USER_AGENT = "ClimaActivaBot/1.0 (+business prospecting; contact: administracion@climactiva.cl)"
 MAX_REDIRECTS = 3
 
@@ -86,7 +97,7 @@ def _jsonld_nodes(value):
             yield from _jsonld_nodes(value["@graph"])
 
 
-def _page_enrichment(response: SafeResponse) -> tuple[dict, str | None]:
+def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
     soup = BeautifulSoup(response.content, "lxml")
     source_url = response.final_url
     emails = set(EMAIL_RE.findall(soup.get_text(" ")))
@@ -165,7 +176,7 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, str | None]:
         )
 
     social: dict[str, str] = {}
-    contact_url: str | None = None
+    relevant_urls: list[str] = []
     source_host = (urlsplit(source_url).hostname or "").lower()
     for anchor in soup.find_all("a", href=True):
         href = urljoin(source_url, str(anchor["href"]))
@@ -176,12 +187,14 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, str | None]:
             ):
                 social[platform] = href
         label = f"{anchor.get_text(' ')} {urlsplit(href).path}".casefold()
-        if (
-            contact_url is None
-            and target_host == source_host
-            and any(token in label for token in ("contact", "contacto", "ubicacion"))
-        ):
-            contact_url = href
+        if target_host == source_host and any(token in label for token in _PAGE_TOKENS):
+            clean = href.split("#", 1)[0]
+            if clean not in relevant_urls:
+                relevant_urls.append(clean)
+
+    visible_text = " ".join(soup.get_text(" ").casefold().split())
+    specialties = sorted({term for term in _SPECIALTY_TERMS if term in visible_text})
+    brands = sorted({brand for brand in _BRAND_TERMS if re.search(rf"(?<!\w){re.escape(brand.casefold())}(?!\w)", visible_text)}, key=str.casefold)
 
     result = {
         "name": next((name for name in names if name), None),
@@ -190,9 +203,12 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, str | None]:
         "website": declared_url or source_url,
         "locations": locations or None,
         "social_media": social or None,
+        "specialties": specialties or None,
+        "brands": brands or None,
+        "pages_visited": [source_url],
         "source_url": source_url,
     }
-    return result, contact_url
+    return result, relevant_urls
 
 
 class SecureWebClient:
@@ -363,13 +379,17 @@ async def enrich_from_website(
     secure_client = client or SecureWebClient()
     try:
         response = await secure_client.fetch_html(website)
-        enrichment, contact_url = _page_enrichment(response)
-        if contact_url and contact_url.rstrip("/") != response.final_url.rstrip("/"):
+        enrichment, relevant_urls = _page_enrichment(response)
+        visited = {response.final_url.rstrip("/")}
+        for page_url in relevant_urls[:4]:
+            if page_url.rstrip("/") in visited:
+                continue
+            visited.add(page_url.rstrip("/"))
             try:
-                contact_response = await secure_client.fetch_html(contact_url)
+                contact_response = await secure_client.fetch_html(page_url)
                 contact, _ = _page_enrichment(contact_response)
             except Exception:  # noqa: BLE001 - homepage evidence remains useful
-                contact = {}
+                continue
             if contact:
                 for field_name in ("name", "email", "phone"):
                     if not enrichment.get(field_name) and contact.get(field_name):
@@ -383,6 +403,9 @@ async def enrich_from_website(
                     **(enrichment.get("social_media") or {}),
                     **(contact.get("social_media") or {}),
                 } or None
+                enrichment["specialties"] = sorted({*(enrichment.get("specialties") or []), *(contact.get("specialties") or [])}) or None
+                enrichment["brands"] = sorted({*(enrichment.get("brands") or []), *(contact.get("brands") or [])}, key=str.casefold) or None
+                enrichment["pages_visited"] = [*(enrichment.get("pages_visited") or []), contact_response.final_url]
     except Exception:  # noqa: BLE001 - enrichment is deliberately best-effort
         return {}
     return enrichment

@@ -20,6 +20,7 @@ class SourceName(str, Enum):
 class RunStatus(str, Enum):
     pending = "pending"
     running = "running"
+    paused = "paused"
     partial = "partial"
     completed = "completed"
     failed = "failed"
@@ -200,6 +201,9 @@ class ProspectCandidate(BaseModel):
     locations: list[ProspectLocation] = Field(default_factory=list, max_length=50)
     category: str | None = Field(default=None, max_length=120)
     description: str | None = Field(default=None, max_length=4000)
+    social_media: dict[str, str] = Field(default_factory=dict, max_length=10)
+    specialties: tuple[str, ...] = Field(default=(), max_length=50)
+    brands: tuple[str, ...] = Field(default=(), max_length=50)
     evidence: list[SourceEvidence] = Field(default_factory=list, max_length=100)
     score: float | None = Field(default=None, ge=0, le=100)
     derived_provenance: dict[str, DerivedProvenance] = Field(default_factory=dict)
@@ -322,6 +326,15 @@ class ClaimedRun(BaseModel):
     # agent may expand locally. An explicit empty list means the CRM has no
     # remaining task UUIDs and must never trigger local expansion.
     tasks: tuple[ClaimedTask, ...] | None = None
+
+
+class ClaimedEnrichment(BaseModel):
+    job_id: str = Field(min_length=1, max_length=200)
+    run_id: str = Field(min_length=1, max_length=200)
+    candidate_relation_id: str = Field(min_length=1, max_length=200)
+    candidate: ProspectCandidate
+    lease_token: str = Field(min_length=1, max_length=200)
+    lease_expires_at: datetime
 
 
 class CompletionReport(BaseModel):
