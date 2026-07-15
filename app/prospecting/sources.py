@@ -720,6 +720,7 @@ class AuthorizedSourceExecutor:
         )
         official_evidence = [item for item in enriched.evidence if item.provider == SourceName.official_website]
         return enriched, {
+            "hvac_relevant": is_hvac_relevant(enriched),
             "website_found": bool(enriched.website),
             "website_discovered_by_brave": website_discovered,
             "official_fields_added": max(0, len(enriched.evidence) - before_evidence),

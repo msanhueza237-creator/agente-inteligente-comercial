@@ -131,7 +131,7 @@ def test_quality_gate_enforces_target_types(snapshot) -> None:
     assert "outside_target_types" in result.reasons
 
 
-def test_google_generic_type_enters_review_instead_of_being_discarded(snapshot) -> None:
+def test_google_generic_type_is_rejected_without_hvac_evidence(snapshot) -> None:
     restricted = snapshot.model_copy(
         update={"campaign": snapshot.campaign.model_copy(update={"target_types": ("tecnico",)})}
     )
@@ -148,7 +148,23 @@ def test_google_generic_type_enters_review_instead_of_being_discarded(snapshot) 
 
     assert prepared.category == "otro"
     assert "target_type_unconfirmed" in prepared.review_flags
-    assert "outside_target_types" not in result.reasons
+    assert "not_hvac_related" in result.reasons
+    assert not result.accepted
+
+
+def test_google_generic_type_is_rescued_by_official_hvac_specialties(snapshot) -> None:
+    raw = candidate(
+        name="Servicios Andes SpA",
+        description="store point_of_interest establishment",
+        category=None,
+        specialties=("aire acondicionado", "mantencion"),
+        provider_ids={"google_places": "place-generic"},
+        review_flags=("hvac_query_match", "hvac_relevance_needs_review"),
+    )
+
+    prepared = classify_and_score(raw, snapshot)
+    result = validate_candidate(prepared, snapshot)
+
     assert result.accepted
 
 

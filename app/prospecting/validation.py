@@ -61,8 +61,6 @@ def normalize_geo(value: str | None) -> str:
 
 
 def is_hvac_relevant(candidate: ProspectCandidate) -> bool:
-    if "hvac_query_match" in candidate.review_flags and candidate.provider_ids.get("google_places"):
-        return True
     text = " ".join(
         unidecode(value).lower()
         for value in (
@@ -70,6 +68,7 @@ def is_hvac_relevant(candidate: ProspectCandidate) -> bool:
             candidate.trade_name,
             candidate.category,
             candidate.description,
+            *candidate.specialties,
         )
         if value
     )
