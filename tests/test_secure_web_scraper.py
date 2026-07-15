@@ -193,3 +193,50 @@ async def test_enrichment_crawls_bounded_service_pages_and_extracts_brands() -> 
     assert {"aire acondicionado", "mantencion", "instalacion", "refrigeracion", "ventilacion"} <= set(result["specialties"])
     assert {"Daikin", "Carrier"} <= set(result["brands"])
     assert len(result["pages_visited"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_enrichment_prioritizes_contact_about_footer_and_whatsapp() -> None:
+    homepage = """
+    <footer>
+      <span>ventas@climasur.cl</span>
+      <span>+56 9 1234 5678</span>
+      <a href="/productos">Productos</a>
+      <a href="/contacto">Contacto</a>
+      <a href="/quienes-somos">Quiénes somos</a>
+    </footer>
+    """.encode()
+    contact = b'<a href="https://api.whatsapp.com/send?phone=56987654321">WhatsApp</a>'
+    about = """
+    <main><p>Somos una empresa chilena especializada en climatización, refrigeración y mantenimiento para instalaciones comerciales e industriales.</p></main>
+    """.encode()
+    products = b"Catalogo general"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        content = {
+            "/contacto": contact,
+            "/quienes-somos": about,
+            "/productos": products,
+        }.get(request.url.path, homepage)
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, content=content)
+
+    client = SecureWebClient(
+        resolver=public_resolver,
+        transport=httpx.MockTransport(handler),
+        min_host_interval=0,
+    )
+    result = await enrich_from_website("https://climasur.cl", client=client)
+
+    assert result["email"] == "ventas@climasur.cl"
+    assert result["phone"] == "+56 9 1234 5678"
+    assert result["social_media"]["whatsapp"].startswith("https://api.whatsapp.com/")
+    assert "empresa chilena especializada" in result["description"]
+    assert result["field_sources"]["email"] == "https://climasur.cl/"
+    assert result["field_sources"]["description"] == "https://climasur.cl/quienes-somos"
+    assert result["pages_visited"][:3] == [
+        "https://climasur.cl/",
+        "https://climasur.cl/contacto",
+        "https://climasur.cl/quienes-somos",
+    ]

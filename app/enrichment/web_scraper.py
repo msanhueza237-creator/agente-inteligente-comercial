@@ -16,21 +16,28 @@ import time
 import urllib.robotparser
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
+from unidecode import unidecode
 
 from app.config import get_settings
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+")
+PHONE_RE = re.compile(
+    r"(?<!\d)(?:\+?56[ .-]?)?(?:9[ .-]?\d{4}[ .-]?\d{4}|2[ .-]?\d{4}[ .-]?\d{4})(?!\d)"
+)
 _SOCIAL_DOMAINS = {
-    "facebook": "facebook.com",
-    "instagram": "instagram.com",
-    "linkedin": "linkedin.com",
-    "whatsapp": "wa.me",
+    "facebook": ("facebook.com",),
+    "instagram": ("instagram.com",),
+    "linkedin": ("linkedin.com",),
+    "whatsapp": ("wa.me", "api.whatsapp.com", "web.whatsapp.com"),
 }
-_PAGE_TOKENS = ("contact", "contacto", "ubicacion", "sucursal", "nosotros", "empresa", "servicio", "solucion", "producto", "marca")
+_PAGE_TOKENS = (
+    "contact", "contacto", "ubicacion", "sucursal", "nosotros", "quienes somos",
+    "acerca de", "empresa", "servicio", "solucion", "producto", "marca",
+)
 _SPECIALTY_TERMS = (
     "aire acondicionado", "climatizacion", "refrigeracion", "ventilacion", "calefaccion",
     "mantencion", "mantenimiento", "instalacion", "servicio tecnico", "proyecto hvac",
@@ -43,6 +50,7 @@ _BRAND_TERMS = (
 )
 USER_AGENT = "ClimaActivaBot/1.0 (+business prospecting; contact: administracion@climactiva.cl)"
 MAX_REDIRECTS = 3
+MAX_SITE_PAGES = 6
 
 Resolver = Callable[[str, int], Awaitable[list[str]]]
 
@@ -97,12 +105,49 @@ def _jsonld_nodes(value):
             yield from _jsonld_nodes(value["@graph"])
 
 
+def _clean_public_description(value: str | None) -> str | None:
+    text = " ".join((value or "").split())
+    if len(text) < 40:
+        return None
+    return text[:500].rstrip(" ,;:-")
+
+
+def _is_about_url(url: str) -> bool:
+    path = unidecode(urlsplit(url).path).casefold().replace("-", " ").replace("_", " ")
+    return any(token in path for token in ("nosotros", "quienes somos", "acerca", "empresa"))
+
+
+def _link_priority(url: str, label: str) -> int:
+    value = unidecode(f"{label} {urlsplit(url).path}").casefold().replace("-", " ")
+    if any(token in value for token in ("contact", "ubicacion", "sucursal")):
+        return 0
+    if any(token in value for token in ("nosotros", "quienes somos", "acerca de", "empresa")):
+        return 1
+    if any(token in value for token in ("servicio", "solucion")):
+        return 2
+    return 3
+
+
+def _whatsapp_phone(url: str) -> str | None:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    raw = ""
+    if host == "wa.me" or host.endswith(".wa.me"):
+        raw = parsed.path.strip("/").split("/", 1)[0]
+    elif host.endswith("whatsapp.com"):
+        raw = (parse_qs(parsed.query).get("phone") or [""])[0]
+    digits = re.sub(r"\D", "", raw)
+    return f"+{digits}" if len(digits) >= 9 else None
+
+
 def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
     soup = BeautifulSoup(response.content, "lxml")
     source_url = response.final_url
-    emails = set(EMAIL_RE.findall(soup.get_text(" ")))
-    phones: set[str] = set()
+    page_text = " ".join(soup.get_text(" ").split())
+    emails = set(EMAIL_RE.findall(page_text))
+    phones: set[str] = set(PHONE_RE.findall(page_text))
     names: list[str] = []
+    descriptions: list[str] = []
     locations: list[dict] = []
     declared_url: str | None = None
 
@@ -112,6 +157,8 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
             emails.add(href.split(":", 1)[1].split("?", 1)[0])
         elif href.lower().startswith("tel:"):
             phones.add(href.split(":", 1)[1].split("?", 1)[0])
+        elif whatsapp_phone := _whatsapp_phone(href):
+            phones.add(whatsapp_phone)
 
     for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
         try:
@@ -125,6 +172,8 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
                 emails.add(node["email"].removeprefix("mailto:").strip())
             if isinstance(node.get("telephone"), str):
                 phones.add(node["telephone"].strip())
+            if isinstance(node.get("description"), str):
+                descriptions.append(node["description"])
             if isinstance(node.get("url"), str):
                 declared_url = node["url"]
             addresses = node.get("address")
@@ -150,6 +199,23 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
     item_name = soup.select_one('[itemprop="name"]')
     if item_name:
         names.append(str(item_name.get("content") or item_name.get_text(" ")).strip())
+    for selector in (
+        ('meta[name="description"]', "content"),
+        ('meta[property="og:description"]', "content"),
+    ):
+        element = soup.select_one(selector[0])
+        if element and element.get(selector[1]):
+            descriptions.append(str(element[selector[1]]))
+    if _is_about_url(source_url):
+        container = soup.select_one("main") or soup.select_one("article") or soup.body
+        if container:
+            paragraphs = [
+                _clean_public_description(paragraph.get_text(" "))
+                for paragraph in container.find_all("p")
+            ]
+            about_text = " ".join(value for value in paragraphs if value)[:500]
+            if about_text:
+                descriptions.insert(0, about_text)
     locality = soup.select_one('[itemprop="addressLocality"]')
     region = soup.select_one('[itemprop="addressRegion"]')
     street = soup.select_one('[itemprop="streetAddress"]')
@@ -176,30 +242,47 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
         )
 
     social: dict[str, str] = {}
-    relevant_urls: list[str] = []
+    relevant_urls: list[tuple[int, str]] = []
     source_host = (urlsplit(source_url).hostname or "").lower()
     for anchor in soup.find_all("a", href=True):
         href = urljoin(source_url, str(anchor["href"]))
         target_host = (urlsplit(href).hostname or "").lower()
-        for platform, domain in _SOCIAL_DOMAINS.items():
-            if platform not in social and (
+        for platform, domains in _SOCIAL_DOMAINS.items():
+            if platform not in social and any(
                 target_host == domain or target_host.endswith(f".{domain}")
+                for domain in domains
             ):
                 social[platform] = href
-        label = f"{anchor.get_text(' ')} {urlsplit(href).path}".casefold()
+        anchor_label = anchor.get_text(" ")
+        label = unidecode(f"{anchor_label} {urlsplit(href).path}").casefold().replace("-", " ")
         if target_host == source_host and any(token in label for token in _PAGE_TOKENS):
             clean = href.split("#", 1)[0]
-            if clean not in relevant_urls:
-                relevant_urls.append(clean)
+            if all(clean != existing for _, existing in relevant_urls):
+                relevant_urls.append((_link_priority(clean, anchor_label), clean))
 
-    visible_text = " ".join(soup.get_text(" ").casefold().split())
+    visible_text = " ".join(unidecode(page_text).casefold().split())
     specialties = sorted({term for term in _SPECIALTY_TERMS if term in visible_text})
     brands = sorted({brand for brand in _BRAND_TERMS if re.search(rf"(?<!\w){re.escape(brand.casefold())}(?!\w)", visible_text)}, key=str.casefold)
 
+    description = next(
+        (prepared for value in descriptions if (prepared := _clean_public_description(value))),
+        None,
+    )
+    field_sources = {
+        field: source_url
+        for field, present in (
+            ("email", bool(emails)),
+            ("phone", bool(phones)),
+            ("description", bool(description)),
+        )
+        if present
+    }
+    field_sources.update({f"social_media.{platform}": source_url for platform in social})
     result = {
         "name": next((name for name in names if name), None),
         "email": sorted(email for email in emails if email)[0] if emails else None,
         "phone": sorted(phone for phone in phones if phone)[0] if phones else None,
+        "description": description,
         "website": declared_url or source_url,
         "locations": locations or None,
         "social_media": social or None,
@@ -207,8 +290,9 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
         "brands": brands or None,
         "pages_visited": [source_url],
         "source_url": source_url,
+        "field_sources": field_sources,
     }
-    return result, relevant_urls
+    return result, [url for _, url in sorted(relevant_urls, key=lambda item: item[0])]
 
 
 class SecureWebClient:
@@ -381,7 +465,7 @@ async def enrich_from_website(
         response = await secure_client.fetch_html(website)
         enrichment, relevant_urls = _page_enrichment(response)
         visited = {response.final_url.rstrip("/")}
-        for page_url in relevant_urls[:4]:
+        for page_url in relevant_urls[:MAX_SITE_PAGES]:
             if page_url.rstrip("/") in visited:
                 continue
             visited.add(page_url.rstrip("/"))
@@ -394,6 +478,16 @@ async def enrich_from_website(
                 for field_name in ("name", "email", "phone"):
                     if not enrichment.get(field_name) and contact.get(field_name):
                         enrichment[field_name] = contact[field_name]
+                        source = (contact.get("field_sources") or {}).get(field_name)
+                        if source:
+                            enrichment.setdefault("field_sources", {})[field_name] = source
+                if contact.get("description") and (
+                    not enrichment.get("description") or _is_about_url(contact_response.final_url)
+                ):
+                    enrichment["description"] = contact["description"]
+                    source = (contact.get("field_sources") or {}).get("description")
+                    if source:
+                        enrichment.setdefault("field_sources", {})["description"] = source
                 if contact.get("locations"):
                     enrichment["locations"] = [
                         *(enrichment.get("locations") or []),
@@ -403,6 +497,9 @@ async def enrich_from_website(
                     **(enrichment.get("social_media") or {}),
                     **(contact.get("social_media") or {}),
                 } or None
+                for field_name, field_source in (contact.get("field_sources") or {}).items():
+                    if field_name.startswith("social_media."):
+                        enrichment.setdefault("field_sources", {})[field_name] = field_source
                 enrichment["specialties"] = sorted({*(enrichment.get("specialties") or []), *(contact.get("specialties") or [])}) or None
                 enrichment["brands"] = sorted({*(enrichment.get("brands") or []), *(contact.get("brands") or [])}, key=str.casefold) or None
                 enrichment["pages_visited"] = [*(enrichment.get("pages_visited") or []), contact_response.final_url]

@@ -108,6 +108,16 @@ def build_company_summary(candidate: ProspectCandidate) -> str:
     )[:5]
     brands = tuple(dict.fromkeys(candidate.brands))[:5]
     category = (candidate.category or "").strip().casefold()
+    official_description = next(
+        (
+            " ".join(item.value.split())[:350].rstrip(" ,;:-")
+            for item in candidate.evidence
+            if item.provider == SourceName.official_website
+            and item.field == "description"
+            and item.value.strip()
+        ),
+        None,
+    )
 
     if specialties:
         sentences = [
@@ -127,6 +137,8 @@ def build_company_summary(candidate: ProspectCandidate) -> str:
 
     if brands:
         sentences.append(f"En su información pública se mencionan marcas como {_spanish_list(brands)}.")
+    if official_description:
+        sentences.append(f"Su sitio oficial indica: {official_description.rstrip('.')}.")
     channels = []
     if candidate.website:
         channels.append("sitio web")
@@ -553,6 +565,7 @@ class AuthorizedSourceExecutor:
         if not enrichment:
             return candidate
         source_url = enrichment.get("source_url") or candidate.website
+        field_sources = enrichment.get("field_sources") or {}
         provider_id = normalize_website(candidate.website)
         evidence = list(candidate.evidence)
 
@@ -625,13 +638,19 @@ class AuthorizedSourceExecutor:
 
         email = enrichment.get("email")
         phone = normalize_phone(enrichment.get("phone"))
-        add("email", email)
-        add("phone", phone)
+        website_description = enrichment.get("description")
+        add("email", email, url=field_sources.get("email"))
+        add("phone", phone, url=field_sources.get("phone"))
+        add("description", website_description, url=field_sources.get("description"))
         social_media = enrichment.get("social_media") or {}
         specialties = tuple(enrichment.get("specialties") or ())
         brands = tuple(enrichment.get("brands") or ())
         for platform, url in social_media.items():
-            add(f"social_media.{platform}", url, url=source_url)
+            add(
+                f"social_media.{platform}",
+                url,
+                url=field_sources.get(f"social_media.{platform}") or source_url,
+            )
         if specialties:
             add("specialties", json.dumps(specialties, ensure_ascii=False), url=source_url)
         if brands:
@@ -641,6 +660,7 @@ class AuthorizedSourceExecutor:
             update={
                 "email": email or candidate.email,
                 "phone": phone or candidate.phone,
+                "description": website_description or candidate.description,
                 "social_media": {**candidate.social_media, **social_media},
                 "specialties": tuple(dict.fromkeys((*candidate.specialties, *specialties))),
                 "brands": tuple(dict.fromkeys((*candidate.brands, *brands))),

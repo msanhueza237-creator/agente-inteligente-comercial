@@ -345,7 +345,12 @@ async def test_email_only_official_enrichment_is_visible_but_not_importable(monk
     async def email_only(_website):
         return {
             "email": "ventas@clima-temporal.cl",
+            "description": "Empresa dedicada a la instalación y mantenimiento de climatización comercial.",
             "source_url": "https://clima-temporal.cl/contacto",
+            "field_sources": {
+                "email": "https://clima-temporal.cl/contacto",
+                "description": "https://clima-temporal.cl/nosotros",
+            },
         }
 
     monkeypatch.setattr("app.prospecting.sources.enrich_from_website", email_only)
@@ -355,6 +360,12 @@ async def test_email_only_official_enrichment_is_visible_but_not_importable(monk
     prepared = scope_candidate_locations(enriched, snapshot)
 
     assert prepared.email == "ventas@clima-temporal.cl"
+    assert prepared.description.startswith("Empresa dedicada")
+    assert any(
+        evidence.field == "description"
+        and evidence.source_url == "https://clima-temporal.cl/nosotros"
+        for evidence in prepared.evidence
+    )
     assert not prepared.import_eligible
     assert "insufficient_permanent_evidence" in prepared.review_flags
 
