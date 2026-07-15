@@ -8,6 +8,7 @@ from app.crm.fake import FakeCRMPort
 from app.crm.http import HttpCRMPort
 from app.crm.port import CRMPort
 from app.db.base import async_session_factory
+from app.integrations.monitor import IntegrationMonitor
 from app.prospecting.sources import AuthorizedSourceExecutor
 from app.prospecting.retention import purge_expired_source_data
 from app.prospecting.store import SQLWorkerStore
@@ -52,11 +53,32 @@ async def main() -> None:
         settings.crm_worker_id,
     )
     retention_task = asyncio.create_task(_retention_loop())
+    integration_task = None
+    if isinstance(worker.crm, HttpCRMPort):
+        integration_task = asyncio.create_task(_integration_loop(worker.crm, settings))
     try:
         await worker.run_forever()
     finally:
         retention_task.cancel()
-        await asyncio.gather(retention_task, return_exceptions=True)
+        if integration_task:
+            integration_task.cancel()
+        await asyncio.gather(
+            retention_task,
+            *([integration_task] if integration_task else []),
+            return_exceptions=True,
+        )
+
+
+async def _integration_loop(crm: HttpCRMPort, settings) -> None:
+    monitor = IntegrationMonitor(crm, settings)
+    while True:
+        try:
+            await monitor.poll_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - an integration test must not stop the worker
+            logger.exception("integration check failed")
+        await asyncio.sleep(settings.worker_poll_seconds)
 
 
 async def _retention_loop() -> None:

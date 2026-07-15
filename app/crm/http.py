@@ -130,6 +130,45 @@ class HttpCRMPort:
             return None
         return ClaimedRun.model_validate(payload)
 
+    async def claim_integration_check(self, worker_id: str) -> dict | None:
+        response = await self._request(
+            "POST",
+            "prospecting-integrations/checks/claim",
+            json={"worker_id": worker_id},
+            headers={"Idempotency-Key": str(uuid.uuid4())},
+        )
+        self._ensure_success(response)
+        payload = self._unwrap(response.json())
+        check = payload.get("check")
+        return check if isinstance(check, dict) else None
+
+    async def report_integration_status(
+        self,
+        *,
+        worker_id: str,
+        check_id: str,
+        provider: str,
+        configured: bool,
+        status: str,
+        message: str,
+        error_code: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        await self._write(
+            "/prospecting-integrations/status",
+            {
+                "worker_id": worker_id,
+                "check_id": check_id,
+                "provider": provider,
+                "configured": configured,
+                "status": status,
+                "message": message,
+                "error_code": error_code,
+                "metadata": metadata or {},
+            },
+            str(uuid.uuid4()),
+        )
+
     async def heartbeat(
         self, run_id: str, lease_token: str, lease_seconds: int = 120
     ) -> HeartbeatResult:

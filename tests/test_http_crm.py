@@ -352,3 +352,38 @@ async def test_terminal_replay_uses_persisted_worker_without_a_new_claim() -> No
 
     assert seen["worker_id"] == "worker-original"
     assert seen["lease_token"] == "expired-original-lease"
+
+
+@pytest.mark.asyncio
+async def test_http_port_claims_and_reports_integration_check() -> None:
+    requests: list[httpx.Request] = []
+    check_id = "78e98170-84cd-47ae-ab50-c4cba325b876"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/checks/claim"):
+            return httpx.Response(
+                200,
+                json={"check": {"id": check_id, "provider": "google_places"}},
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    port = HttpCRMPort(
+        base_url="https://crm.test",
+        api_key="ca_live_test",
+        transport=httpx.MockTransport(handler),
+    )
+    check = await port.claim_integration_check("worker-1")
+    await port.report_integration_status(
+        worker_id="worker-1",
+        check_id=check_id,
+        provider="google_places",
+        configured=True,
+        status="connected",
+        message="Conexion correcta.",
+    )
+
+    assert check == {"id": check_id, "provider": "google_places"}
+    assert requests[0].url.path == "/crm-agent/prospecting-integrations/checks/claim"
+    assert requests[1].url.path == "/crm-agent/prospecting-integrations/status"
+    assert all(request.headers.get("Idempotency-Key") for request in requests)

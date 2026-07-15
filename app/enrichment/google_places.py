@@ -42,7 +42,11 @@ class GooglePlacesError(Exception):
 
 
 class GooglePlacesClient:
-    def __init__(self, api_key: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         settings = get_settings()
         self.api_key = api_key or settings.google_maps_api_key
         if not self.api_key:
@@ -50,10 +54,13 @@ class GooglePlacesClient:
                 "GOOGLE_MAPS_API_KEY no esta configurado. Agregalo a tu .env para "
                 "activar la busqueda de prospectos en Google Maps."
             )
+        self.transport = transport
 
     async def text_search(self, query: str, *, max_results: int = 20) -> list[dict]:
         """Pro-tier search: cheap, enough to discover + pre-filter candidates."""
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=15, trust_env=False, transport=self.transport
+        ) as client:
             resp = await client.post(
                 f"{PLACES_BASE_URL}/places:searchText",
                 headers={
@@ -65,7 +72,7 @@ class GooglePlacesClient:
                     "textQuery": query,
                     "languageCode": "es",
                     "regionCode": "CL",
-                    "maxResultCount": min(max_results, 20),
+                    "pageSize": min(max_results, 20),
                 },
             )
         if resp.status_code != 200:
@@ -74,11 +81,83 @@ class GooglePlacesClient:
             )
         return resp.json().get("places", [])
 
+    async def check_connection(self) -> dict[str, object]:
+        """Run one minimal Places request without returning provider payloads.
+
+        Only a place identifier is requested. The API key and Google's response
+        body are deliberately excluded from the result and from exceptions.
+        """
+        try:
+            async with httpx.AsyncClient(
+                timeout=15, trust_env=False, transport=self.transport
+            ) as client:
+                response = await client.post(
+                    f"{PLACES_BASE_URL}/places:searchText",
+                    headers={
+                        "X-Goog-Api-Key": self.api_key,
+                        "X-Goog-FieldMask": "places.id",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "textQuery": "climatizacion en Santiago, Chile",
+                        "languageCode": "es",
+                        "regionCode": "CL",
+                        "pageSize": 1,
+                    },
+                )
+        except httpx.TimeoutException:
+            return {
+                "status": "error",
+                "error_code": "timeout",
+                "message": "Google Places no respondio dentro del tiempo esperado.",
+            }
+        except httpx.TransportError:
+            return {
+                "status": "error",
+                "error_code": "network_error",
+                "message": "No fue posible conectar con Google Places desde el agente.",
+            }
+
+        if response.status_code == 200:
+            return {
+                "status": "connected",
+                "error_code": None,
+                "message": "Google Places respondio correctamente.",
+            }
+        if response.status_code == 429:
+            return {
+                "status": "quota_exhausted",
+                "error_code": "quota_exhausted",
+                "message": "Google Places rechazo la prueba por cuota o limite de consumo.",
+            }
+        if response.status_code == 403:
+            return {
+                "status": "error",
+                "error_code": "forbidden",
+                "message": (
+                    "Google Places rechazo la credencial. Revisa API habilitada, "
+                    "facturacion y restricciones de la clave."
+                ),
+            }
+        if response.status_code >= 500:
+            return {
+                "status": "error",
+                "error_code": "provider_unavailable",
+                "message": "Google Places esta temporalmente no disponible.",
+            }
+        return {
+            "status": "error",
+            "error_code": f"http_{response.status_code}",
+            "message": "Google Places rechazo la solicitud de prueba.",
+        }
+
     async def get_place_details(self, place_id: str) -> dict | None:
         """Enterprise-tier fetch: only call this for candidates that passed
         the relevance pre-filter."""
         fields = _PRO_FIELDS + _ENTERPRISE_ONLY_FIELDS
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=15, trust_env=False, transport=self.transport
+        ) as client:
             resp = await client.get(
                 f"{PLACES_BASE_URL}/places/{place_id}",
                 headers={
