@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     google_maps_api_key: str | None = None
     google_places_daily_budget_usd: float = 20.0
     google_places_monthly_budget_usd: float = 400.0
+    google_places_run_budget_usd: float = 10.0
+    google_places_budget_alert_ratio: float = 0.70
+    # A task may fan out into several complementary Text Search requests.
+    # Place Details remains capped separately to keep the search predictable.
+    google_places_queries_per_task: int = 6
+    google_places_detail_multiplier: int = 2
 
     # Licensed web search. The key is used only by the Brave API adapter.
     brave_search_api_key: str | None = None
@@ -62,6 +68,21 @@ class Settings(BaseSettings):
                 raise ValueError("CRM_API_KEY is required when CRM_MODE=http")
         if not self.crm_worker_id.strip():
             raise ValueError("CRM_WORKER_ID cannot be empty")
+        if not 1 <= self.google_places_queries_per_task <= 12:
+            raise ValueError("GOOGLE_PLACES_QUERIES_PER_TASK must be between 1 and 12")
+        if not 1 <= self.google_places_detail_multiplier <= 3:
+            raise ValueError("GOOGLE_PLACES_DETAIL_MULTIPLIER must be between 1 and 3")
+        if (
+            min(
+                self.google_places_run_budget_usd,
+                self.google_places_daily_budget_usd,
+                self.google_places_monthly_budget_usd,
+            )
+            <= 0
+        ):
+            raise ValueError("Google Places budgets must be positive")
+        if not 0.1 <= self.google_places_budget_alert_ratio <= 1:
+            raise ValueError("GOOGLE_PLACES_BUDGET_ALERT_RATIO must be between 0.1 and 1")
         return self
 
 

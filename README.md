@@ -27,6 +27,14 @@ expone en el monitor ni se incluye en logs.
 6. Eventos y candidatos se envían con lease e `Idempotency-Key`. Una caída del
    CRM conserva el mensaje en `crm_outbox_messages`.
 
+Google Places usa cobertura masiva controlada: cada tarea genera consultas
+complementarias según los tipos objetivo, deduplica por Place ID y solicita
+detalles sólo a una cantidad acotada de resultados dentro de la comuna. Los
+perfiles con categorías genéricas entran a revisión con
+`target_type_unconfirmed`; ya no se eliminan antes de que una persona pueda
+evaluarlos. La cronología reporta consultas ejecutadas, resultados brutos,
+resultados únicos, detalles solicitados y costo estimado.
+
 Páginas Amarillas no forma parte del flujo. El scraper legado fue retirado y
 el conector permanece bloqueado incluso si se alteran los flags de
 compatibilidad; sólo podrá reemplazarse por un feed/API oficial autorizado.
@@ -68,6 +76,12 @@ CRM_BASE_URL=https://supabase.latinchile.cl/functions/v1/crm-agent
 CRM_API_KEY=ca_live_valor_entregado_una_vez
 CRM_WORKER_ID=climactiva-worker-01
 GOOGLE_MAPS_API_KEY=
+GOOGLE_PLACES_QUERIES_PER_TASK=6
+GOOGLE_PLACES_DETAIL_MULTIPLIER=2
+GOOGLE_PLACES_RUN_BUDGET_USD=10.0
+GOOGLE_PLACES_DAILY_BUDGET_USD=20.0
+GOOGLE_PLACES_MONTHLY_BUDGET_USD=400.0
+GOOGLE_PLACES_BUDGET_ALERT_RATIO=0.70
 BRAVE_SEARCH_API_KEY=
 SESSION_SECRET_KEY=una-clave-independiente
 ```

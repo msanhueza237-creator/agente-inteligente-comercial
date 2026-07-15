@@ -84,9 +84,7 @@ def expand_task_specs(snapshot: ProspectingRunSnapshot) -> list[TaskSpec]:
     ]
 
 
-def validate_claimed_task(
-    snapshot: ProspectingRunSnapshot, task: ClaimedTask
-) -> Territory:
+def validate_claimed_task(snapshot: ProspectingRunSnapshot, task: ClaimedTask) -> Territory:
     discovery_sources = {SourceName.google_places, SourceName.brave_search}
     if task.source not in discovery_sources or task.source not in snapshot.campaign.sources:
         raise ValueError("claimed task source is outside the run snapshot")
@@ -151,6 +149,7 @@ class RunSummary:
     dead_letters: int = 0
     crm_accepted: int = 0
     rejected_limit: int = 0
+    budget_limited: int = 0
 
     @property
     def work_remaining(self) -> bool:
@@ -210,9 +209,7 @@ class WorkerStore(Protocol):
 
     async def has_pending_outbox(self, run_id: str) -> bool: ...
 
-    async def pending_terminal_replays(
-        self, limit: int = 50
-    ) -> list[TerminalOutboxReplay]: ...
+    async def pending_terminal_replays(self, limit: int = 50) -> list[TerminalOutboxReplay]: ...
 
     async def mark_outbox_delivered(self, message_id: str) -> None: ...
 
@@ -226,9 +223,7 @@ class WorkerStore(Protocol):
         error: str | None = None,
     ) -> None: ...
 
-    async def mark_outbox_failed(
-        self, message_id: str, error: str, *, retryable: bool
-    ) -> bool: ...
+    async def mark_outbox_failed(self, message_id: str, error: str, *, retryable: bool) -> bool: ...
 
     async def record_candidate_ack(
         self, run_id: str, message_id: str, ack: CandidateBatchAck
@@ -321,15 +316,12 @@ def index_candidate_location_evidence(candidate: ProspectCandidate) -> ProspectC
         if len(candidate.locations) == 1:
             anchor_sources = None
         elif location.address:
-            expected_address = normalize_evidence_value(
-                "location.address", location.address
-            )
+            expected_address = normalize_evidence_value("location.address", location.address)
             anchor_sources = {
                 source_key(item)
                 for item in legacy
                 if item.field == "location.address"
-                and normalize_evidence_value("location.address", item.value)
-                == expected_address
+                and normalize_evidence_value("location.address", item.value) == expected_address
             }
             if not anchor_sources:
                 continue
@@ -350,26 +342,17 @@ def index_candidate_location_evidence(candidate: ProspectCandidate) -> ProspectC
                     continue
                 if anchor_sources is not None and source_key(item) not in anchor_sources:
                     continue
-                indexed.append(
-                    item.model_copy(update={"field": f"locations[{index}].{attribute}"})
-                )
-    return candidate.model_copy(
-        update={"evidence": compact_evidence([*legacy, *indexed])}
-    )
+                indexed.append(item.model_copy(update={"field": f"locations[{index}].{attribute}"}))
+    return candidate.model_copy(update={"evidence": compact_evidence([*legacy, *indexed])})
 
 
 def assess_import_eligibility(candidate: ProspectCandidate) -> ProspectCandidate:
     """Mark which locations remain importable without temporary provider data."""
 
     permanent = [item for item in candidate.evidence if item.retention_until is None]
-    name_ok = has_compatible_evidence(
-        candidate, "name", candidate.name, evidence_items=permanent
-    )
+    name_ok = has_compatible_evidence(candidate, "name", candidate.name, evidence_items=permanent)
     contact_ok = any(
-        value
-        and has_compatible_evidence(
-            candidate, field_name, value, evidence_items=permanent
-        )
+        value and has_compatible_evidence(candidate, field_name, value, evidence_items=permanent)
         for field_name, value in (
             ("phone", candidate.phone),
             ("email", candidate.email),
@@ -432,17 +415,13 @@ def scope_candidate_locations(
             location.region_code for location in locations if location.region_code
         },
         "location.region_name": {
-            normalize_geo(location.region_name)
-            for location in locations
-            if location.region_name
+            normalize_geo(location.region_name) for location in locations if location.region_name
         },
         "location.comuna_code": {
             location.comuna_code for location in locations if location.comuna_code
         },
         "location.comuna_name": {
-            normalize_geo(location.comuna_name)
-            for location in locations
-            if location.comuna_name
+            normalize_geo(location.comuna_name) for location in locations if location.comuna_name
         },
         "location.address": {
             normalize_address(location.address)
@@ -488,9 +467,7 @@ def scope_candidate_locations(
             if new_index is not None:
                 evidence.append(
                     item.model_copy(
-                        update={
-                            "field": f"locations[{new_index}].{indexed_match.group(2)}"
-                        }
+                        update={"field": f"locations[{new_index}].{indexed_match.group(2)}"}
                     )
                 )
             continue
@@ -576,9 +553,7 @@ class SQLWorkerStore:
                         "pending",
                         "running",
                     }:
-                        preserve_local_completion = (
-                            task_id in queued_completion_task_ids
-                        )
+                        preserve_local_completion = task_id in queued_completion_task_ids
                     task.source = claimed_task.source.value
                     task.keyword = claimed_task.keyword
                     task.region_code = claimed_task.region_code
@@ -594,9 +569,7 @@ class SQLWorkerStore:
                         task.attempt_count = claimed_task.attempts
                     task.lease_owner = None
                     task.heartbeat_at = None
-                    task.lease_expires_at = (
-                        now_utc() if task.status == "running" else None
-                    )
+                    task.lease_expires_at = now_utc() if task.status == "running" else None
                 for task_id, task in existing_tasks.items():
                     if task_id not in remote_ids:
                         task.status = "cancelled"
@@ -782,9 +755,7 @@ class SQLWorkerStore:
                     )
                     if current_index is not None:
                         prepared = merge_exact_candidate(known[current_index], incoming)
-                        prepared = prepared.model_copy(
-                            update={"candidate_id": match.matched_id}
-                        )
+                        prepared = prepared.model_copy(update={"candidate_id": match.matched_id})
                         prepared = scope_candidate_locations(prepared, snapshot)
                         row = rows[current_index]
                         row.payload = prepared.model_dump(mode="json")
@@ -973,9 +944,7 @@ class SQLWorkerStore:
                 )
             )
 
-    async def pending_terminal_replays(
-        self, limit: int = 50
-    ) -> list[TerminalOutboxReplay]:
+    async def pending_terminal_replays(self, limit: int = 50) -> list[TerminalOutboxReplay]:
         async with self._sessions() as session:
             rows = (
                 await session.execute(
@@ -1040,9 +1009,7 @@ class SQLWorkerStore:
             run.error_log = error
             run.finished_at = now_utc()
 
-    async def mark_outbox_failed(
-        self, message_id: str, error: str, *, retryable: bool
-    ) -> bool:
+    async def mark_outbox_failed(self, message_id: str, error: str, *, retryable: bool) -> bool:
         async with self._sessions() as session, session.begin():
             row = await session.get(CRMOutboxMessage, uuid.UUID(message_id), with_for_update=True)
             if row is None:
@@ -1106,6 +1073,12 @@ class SQLWorkerStore:
                     CRMOutboxMessage.status == "dead",
                 )
             )
+            budget_limited = await session.scalar(
+                select(func.count(ProspectingEventRecord.id)).where(
+                    ProspectingEventRecord.run_id == uuid.UUID(run_id),
+                    ProspectingEventRecord.metrics["budget_limited"].as_boolean().is_(True),
+                )
+            )
             return RunSummary(
                 pending=counts.get("pending", 0),
                 running=counts.get("running", 0),
@@ -1116,6 +1089,7 @@ class SQLWorkerStore:
                 dead_letters=dead_letters or 0,
                 crm_accepted=int((run.stats or {}).get("crm_accepted", 0)) if run else 0,
                 rejected_limit=int((run.stats or {}).get("rejected_limit", 0)) if run else 0,
+                budget_limited=budget_limited or 0,
             )
 
     async def set_run_status(
@@ -1187,7 +1161,8 @@ class MemoryWorkerStore:
                 [
                     message.payload
                     for key, message in run.outbox.items()
-                    if key not in run.outbox_delivered and key not in run.outbox_dead
+                    if key not in run.outbox_delivered
+                    and key not in run.outbox_dead
                     and message.kind == "events"
                 ]
             )
@@ -1208,9 +1183,7 @@ class MemoryWorkerStore:
                     )
                     status = existing.status if preserve_local_completion else spec.status
                     attempts = (
-                        existing.task.attempt_count
-                        if preserve_local_completion
-                        else spec.attempts
+                        existing.task.attempt_count if preserve_local_completion else spec.attempts
                     )
                     run.tasks[task_id] = _MemoryTask(
                         task=WorkerTask(
@@ -1238,9 +1211,7 @@ class MemoryWorkerStore:
                         record.lease_owner = None
                         record.lease_expires_at = None
             elif is_new:
-                specs = (
-                    tuple(expand_task_specs(claim.snapshot))
-                )
+                specs = tuple(expand_task_specs(claim.snapshot))
                 for index, spec in enumerate(specs, start=1):
                     task_id = getattr(spec, "task_id", f"{run_id}-task-{index}")
                     max_attempts = getattr(spec, "max_attempts", task_max_attempts)
@@ -1428,7 +1399,8 @@ class MemoryWorkerStore:
             return [
                 message
                 for key, message in run.outbox.items()
-                if key not in run.outbox_delivered and key not in run.outbox_dead
+                if key not in run.outbox_delivered
+                and key not in run.outbox_dead
                 and run.outbox_available_at.get(key, datetime.min.replace(tzinfo=timezone.utc))
                 <= now_utc()
             ][:limit]
@@ -1437,13 +1409,10 @@ class MemoryWorkerStore:
         async with self._lock:
             run = self.runs[run_id]
             return any(
-                key not in run.outbox_delivered and key not in run.outbox_dead
-                for key in run.outbox
+                key not in run.outbox_delivered and key not in run.outbox_dead for key in run.outbox
             )
 
-    async def pending_terminal_replays(
-        self, limit: int = 50
-    ) -> list[TerminalOutboxReplay]:
+    async def pending_terminal_replays(self, limit: int = 50) -> list[TerminalOutboxReplay]:
         async with self._lock:
             replays: list[TerminalOutboxReplay] = []
             for run_id, run in self.runs.items():
@@ -1490,9 +1459,7 @@ class MemoryWorkerStore:
             run.outbox_delivered.add(message_id)
             run.status = status
 
-    async def mark_outbox_failed(
-        self, message_id: str, error: str, *, retryable: bool
-    ) -> bool:
+    async def mark_outbox_failed(self, message_id: str, error: str, *, retryable: bool) -> bool:
         del error
         async with self._lock:
             for run in self.runs.values():
@@ -1522,9 +1489,7 @@ class MemoryWorkerStore:
                 if ack.candidates_found is not None
                 else run.remote_candidates_baseline + ack.accepted
             )
-            run.remote_candidates_baseline = max(
-                run.remote_candidates_baseline, acknowledged_total
-            )
+            run.remote_candidates_baseline = max(run.remote_candidates_baseline, acknowledged_total)
             run.crm_accepted += ack.accepted
             run.rejected_limit += ack.rejected_limit
             run.outbox_delivered.add(message_id)
@@ -1555,6 +1520,14 @@ class MemoryWorkerStore:
                 dead_letters=len(run.outbox_dead),
                 crm_accepted=run.crm_accepted,
                 rejected_limit=run.rejected_limit,
+                budget_limited=sum(
+                    1
+                    for message in run.outbox.values()
+                    if message.kind == "events"
+                    for event in (message.payload if isinstance(message.payload, list) else [])
+                    if isinstance(event, dict)
+                    and bool((event.get("metrics") or {}).get("budget_limited"))
+                ),
             )
 
     async def set_run_status(

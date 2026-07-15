@@ -59,12 +59,12 @@ class IntegrationMonitor:
             metadata={
                 "daily_budget_usd": self.settings.google_places_daily_budget_usd,
                 "monthly_budget_usd": self.settings.google_places_monthly_budget_usd,
+                "run_budget_usd": self.settings.google_places_run_budget_usd,
+                "budget_alert_percent": int(self.settings.google_places_budget_alert_ratio * 100),
             },
         )
 
-    async def _report_not_configured(
-        self, check_id: str, provider: str, configured: bool
-    ) -> None:
+    async def _report_not_configured(self, check_id: str, provider: str, configured: bool) -> None:
         await self.crm.report_integration_status(
             worker_id=self.settings.crm_worker_id,
             check_id=check_id,

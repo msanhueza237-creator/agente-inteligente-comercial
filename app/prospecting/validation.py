@@ -61,6 +61,8 @@ def normalize_geo(value: str | None) -> str:
 
 
 def is_hvac_relevant(candidate: ProspectCandidate) -> bool:
+    if "hvac_query_match" in candidate.review_flags and candidate.provider_ids.get("google_places"):
+        return True
     text = " ".join(
         unidecode(value).lower()
         for value in (
@@ -234,6 +236,12 @@ def validate_candidate(
         reasons.append("missing_business_contact")
     if not has_complete_evidence(candidate):
         reasons.append("missing_required_evidence")
-    if candidate.category and candidate.category not in snapshot.campaign.target_types:
+    if (
+        candidate.category
+        and candidate.category not in snapshot.campaign.target_types
+        and not (
+            candidate.category == "otro" and "target_type_unconfirmed" in candidate.review_flags
+        )
+    ):
         reasons.append("outside_target_types")
     return QualityResult(accepted=not reasons, reasons=tuple(reasons))

@@ -32,9 +32,9 @@ _ENTERPRISE_ONLY_FIELDS = [
     "googleMapsUri",
 ]
 
-# Rough per-call cost estimates (USD) -- see plan section 7 for the source
-# figures (~$32/1000 Pro tier, ~$35/1000 Enterprise tier as of plan-writing).
-COST_ESTIMATE_USD = {"pro": 0.032, "enterprise": 0.035}
+# Public list prices per successful request before monthly free usage caps.
+# Text Search Pro: $32/1000; Place Details Enterprise: $20/1000 (2026-07-15).
+COST_ESTIMATE_USD = {"pro": 0.032, "enterprise": 0.020}
 
 
 class GooglePlacesError(Exception):
@@ -181,14 +181,17 @@ def extract_region_comuna(address_components: list[dict] | None) -> tuple[str | 
         return None, None
 
     region = None
-    comuna = None
+    administrative_comuna = None
+    locality = None
     for comp in address_components:
         types = comp.get("types", [])
         text = comp.get("longText")
         if "administrative_area_level_1" in types:
             region = text
-        elif "administrative_area_level_3" in types and not comuna:
-            comuna = text
-        elif "locality" in types and not comuna:
-            comuna = text
-    return region, comuna
+        if "administrative_area_level_3" in types and not administrative_comuna:
+            administrative_comuna = text
+        if "locality" in types and not locality:
+            locality = text
+    # In Chile the locality may say "Santiago" even when the actual comuna is
+    # Estacion Central, Quinta Normal, etc. The administrative level wins.
+    return region, administrative_comuna or locality

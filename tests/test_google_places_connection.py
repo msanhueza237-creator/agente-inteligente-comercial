@@ -3,7 +3,23 @@ import json
 import httpx
 import pytest
 
-from app.enrichment.google_places import GooglePlacesClient
+from app.enrichment.google_places import GooglePlacesClient, extract_region_comuna
+
+
+def test_chilean_comuna_prefers_administrative_area_over_locality() -> None:
+    region, comuna = extract_region_comuna(
+        [
+            {"types": ["locality"], "longText": "Santiago"},
+            {"types": ["administrative_area_level_3"], "longText": "Estacion Central"},
+            {
+                "types": ["administrative_area_level_1"],
+                "longText": "Region Metropolitana de Santiago",
+            },
+        ]
+    )
+
+    assert region == "Region Metropolitana de Santiago"
+    assert comuna == "Estacion Central"
 
 
 @pytest.mark.asyncio

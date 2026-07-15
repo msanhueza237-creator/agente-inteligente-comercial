@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import httpx
@@ -7,7 +9,9 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlsplit
 
 from app.config import get_settings
+from app.db.models import PlacesFieldTier, PlacesQueryType
 from app.enrichment.google_places import (
+    COST_ESTIMATE_USD,
     GooglePlacesClient,
     GooglePlacesError,
     extract_region_comuna,
@@ -24,9 +28,27 @@ from app.prospecting.contracts import (
     SourceEvidence,
     SourceName,
 )
+from app.prospecting.budget import GooglePlacesBudget, MemoryGooglePlacesBudget
 from app.prospecting.store import WorkerTask
 from app.prospecting.validation import normalize_geo
 from app.prospecting.validation import is_hvac_relevant
+
+
+@dataclass(frozen=True)
+class SourceSearchResult(Sequence[ProspectCandidate]):
+    """Candidates plus operational metrics from a discovery connector."""
+
+    candidates: tuple[ProspectCandidate, ...]
+    metrics: dict[str, int | float | str | bool | None] = field(default_factory=dict)
+
+    def __iter__(self) -> Iterator[ProspectCandidate]:
+        return iter(self.candidates)
+
+    def __len__(self) -> int:
+        return len(self.candidates)
+
+    def __getitem__(self, index):
+        return self.candidates[index]
 
 
 class SourceNotConfigured(RuntimeError):
@@ -36,7 +58,53 @@ class SourceNotConfigured(RuntimeError):
 class SourceExecutor(Protocol):
     async def search(
         self, task: WorkerTask, snapshot: ProspectingRunSnapshot
-    ) -> list[ProspectCandidate]: ...
+    ) -> Sequence[ProspectCandidate]: ...
+
+
+_TARGET_QUERY_PREFIXES = {
+    "distribuidor": ("distribuidor", "mayorista", "importador"),
+    "tienda comercial": ("tienda", "venta"),
+    "tecnico": ("servicio tecnico", "mantencion y reparacion"),
+    "instalador grande": ("empresa instaladora", "proyectos comerciales"),
+    "competencia": ("empresa",),
+    "otro": ("empresa",),
+}
+
+
+def build_google_query_plan(
+    task: WorkerTask,
+    snapshot: ProspectingRunSnapshot,
+    *,
+    max_queries: int,
+) -> tuple[str, ...]:
+    """Expand one CRM task into complementary, deduplicated search intents."""
+
+    location = f"{task.comuna_name}, {task.region_name}, Chile"
+    queries = [f"{task.keyword} en {location}"]
+    for target_type in snapshot.campaign.target_types:
+        for prefix in _TARGET_QUERY_PREFIXES.get(target_type, ()):
+            queries.append(f"{prefix} de {task.keyword} en {location}")
+    queries.extend(
+        (
+            f"empresa de {task.keyword} en {location}",
+            f"instalacion de {task.keyword} en {location}",
+            f"mantencion de {task.keyword} en {location}",
+            f"servicio tecnico de {task.keyword} en {location}",
+            f"venta de {task.keyword} en {location}",
+            f"proveedor de {task.keyword} en {location}",
+        )
+    )
+    unique: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        key = " ".join(query.casefold().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(query)
+        if len(unique) >= max_queries:
+            break
+    return tuple(unique)
 
 
 def _evidence(
@@ -74,16 +142,23 @@ def _location_for_google(place: dict, task: WorkerTask) -> ProspectLocation:
 class AuthorizedSourceExecutor:
     """Only licensed APIs plus the company's own public website are used."""
 
-    def __init__(self) -> None:
+    def __init__(self, budget: GooglePlacesBudget | None = None) -> None:
         self.settings = get_settings()
+        self.budget = budget or MemoryGooglePlacesBudget(self.settings)
 
     async def search(
         self, task: WorkerTask, snapshot: ProspectingRunSnapshot
-    ) -> list[ProspectCandidate]:
+    ) -> SourceSearchResult:
         if task.source == SourceName.google_places:
-            candidates = await self._google(task)
+            result = await self._google(task, snapshot)
+            candidates = list(result)
+            metrics = dict(result.metrics)
         elif task.source == SourceName.brave_search:
             candidates = await self._brave(task)
+            metrics = {
+                "queries_executed": 1,
+                "unique_results": len(candidates),
+            }
         else:
             raise SourceNotConfigured(f"{task.source.value} is not a discovery source")
 
@@ -91,17 +166,65 @@ class AuthorizedSourceExecutor:
             candidates = [
                 await self._enrich_official_website(candidate, task) for candidate in candidates
             ]
-        return candidates
+        return SourceSearchResult(tuple(candidates), metrics)
 
-    async def _google(self, task: WorkerTask) -> list[ProspectCandidate]:
+    async def _google(
+        self, task: WorkerTask, snapshot: ProspectingRunSnapshot
+    ) -> SourceSearchResult:
         try:
             client = GooglePlacesClient()
         except GooglePlacesError as exc:
             raise SourceNotConfigured(str(exc)) from exc
-        query = f"{task.keyword} en {task.comuna_name}, {task.region_name}, Chile"
-        places = await client.text_search(query, max_results=task.max_results)
-        survivors: list[dict] = []
-        for place in places:
+        queries = build_google_query_plan(
+            task,
+            snapshot,
+            max_queries=self.settings.google_places_queries_per_task,
+        )
+        unique_places: dict[str, dict] = {}
+        raw_results = 0
+        queries_executed = 0
+        budget_limited = False
+        budget_reason: str | None = None
+        budget_alert = False
+        run_spend = 0.0
+        daily_spend = 0.0
+        monthly_spend = 0.0
+        for query in queries:
+            reservation = await self.budget.reserve(
+                run_id=snapshot.crm_run_id,
+                task_id=task.id,
+                query_type=PlacesQueryType.text_search,
+                tier=PlacesFieldTier.pro,
+                region=task.region_name,
+                keyword=task.keyword,
+            )
+            if not reservation.allowed:
+                budget_limited = True
+                budget_reason = reservation.reason
+                break
+            places = await client.text_search(query, max_results=task.max_results)
+            queries_executed += 1
+            await self.budget.complete(reservation, len(places))
+            budget_alert = budget_alert or reservation.alert
+            run_spend = reservation.run_spend_usd
+            daily_spend = reservation.daily_spend_usd
+            monthly_spend = reservation.monthly_spend_usd
+            raw_results += len(places)
+            for place in places:
+                place_id = place.get("id")
+                fallback_key = "|".join(
+                    (
+                        ((place.get("displayName") or {}).get("text") or "").casefold(),
+                        (place.get("formattedAddress") or "").casefold(),
+                    )
+                )
+                key = place_id or fallback_key
+                if key.strip("|"):
+                    unique_places.setdefault(key, place)
+
+        survivors: list[tuple[int, dict]] = []
+        outside_territory = 0
+        for place in unique_places.values():
             name = (place.get("displayName") or {}).get("text") or ""
             discovery_candidate = ProspectCandidate(
                 name=name or "Resultado sin nombre",
@@ -109,22 +232,52 @@ class AuthorizedSourceExecutor:
                 description=" ".join(place.get("types") or []),
             )
             location = discovery_candidate.location
-            if (
-                is_hvac_relevant(discovery_candidate)
-                and location.region_code == task.region_code
-                and location.comuna_code == task.comuna_code
-            ):
-                survivors.append(place)
+            if location.region_code != task.region_code or location.comuna_code != task.comuna_code:
+                outside_territory += 1
+                continue
+            # Prefer explicit HVAC signals, but do not discard generic Google
+            # categories before Place Details can provide contact information.
+            priority = 1 if is_hvac_relevant(discovery_candidate) else 0
+            survivors.append((priority, place))
+        survivors.sort(key=lambda item: item[0], reverse=True)
 
         candidates: list[ProspectCandidate] = []
-        for place in survivors[: task.max_results]:
+        detail_limit = min(
+            len(survivors),
+            task.max_results * self.settings.google_places_detail_multiplier,
+        )
+        details_requested = 0
+        for _priority, place in survivors[:detail_limit]:
             place_id = place.get("id")
-            details = await client.get_place_details(place_id) if place_id else None
+            details = None
+            if place_id:
+                reservation = await self.budget.reserve(
+                    run_id=snapshot.crm_run_id,
+                    task_id=task.id,
+                    query_type=PlacesQueryType.place_details,
+                    tier=PlacesFieldTier.enterprise,
+                    region=task.region_name,
+                    keyword=task.keyword,
+                )
+                if not reservation.allowed:
+                    budget_limited = True
+                    budget_reason = reservation.reason
+                    break
+                details = await client.get_place_details(place_id)
+                await self.budget.complete(reservation, int(details is not None))
+                budget_alert = budget_alert or reservation.alert
+                run_spend = reservation.run_spend_usd
+                daily_spend = reservation.daily_spend_usd
+                monthly_spend = reservation.monthly_spend_usd
+            details_requested += int(bool(place_id))
             source = details or place
             name = (source.get("displayName") or {}).get("text")
             if not name:
                 continue
             location = _location_for_google(source, task)
+            if location.region_code != task.region_code or location.comuna_code != task.comuna_code:
+                outside_territory += 1
+                continue
             source_url = source.get("googleMapsUri")
             phone = normalize_phone(
                 source.get("nationalPhoneNumber") or source.get("internationalPhoneNumber")
@@ -196,18 +349,50 @@ class AuthorizedSourceExecutor:
                     provider_record_id=place_id,
                 ),
             ]
-            candidates.append(
-                ProspectCandidate(
-                    name=name,
-                    provider_ids={"google_places": place_id} if place_id else {},
-                    phone=phone,
-                    website=website_uri,
-                    location=location,
-                    description=description,
-                    evidence=[item for item in evidence if item is not None],
-                )
+            candidate = ProspectCandidate(
+                name=name,
+                provider_ids={"google_places": place_id} if place_id else {},
+                phone=phone,
+                website=website_uri,
+                location=location,
+                description=description,
+                evidence=[item for item in evidence if item is not None],
             )
-        return candidates
+            if not is_hvac_relevant(candidate):
+                candidate = candidate.model_copy(
+                    update={
+                        "review_flags": (
+                            *candidate.review_flags,
+                            "hvac_query_match",
+                            "hvac_relevance_needs_review",
+                        )
+                    }
+                )
+            candidates.append(candidate)
+        return SourceSearchResult(
+            tuple(candidates),
+            {
+                "queries_planned": len(queries),
+                "queries_executed": queries_executed,
+                "raw_results": raw_results,
+                "unique_results": len(unique_places),
+                "outside_territory_discovery": outside_territory,
+                "details_requested": details_requested,
+                "candidates_prepared": len(candidates),
+                "estimated_google_cost_usd": round(
+                    queries_executed * COST_ESTIMATE_USD["pro"]
+                    + details_requested * COST_ESTIMATE_USD["enterprise"],
+                    4,
+                ),
+                "budget_limited": budget_limited,
+                "budget_reason": budget_reason,
+                "budget_alert": budget_alert,
+                "run_spend_usd": round(run_spend, 4),
+                "daily_spend_usd": round(daily_spend, 4),
+                "monthly_spend_usd": round(monthly_spend, 4),
+                "run_budget_usd": self.settings.google_places_run_budget_usd,
+            },
+        )
 
     async def _brave(self, task: WorkerTask) -> list[ProspectCandidate]:
         if not self.settings.brave_search_api_key:
@@ -320,8 +505,7 @@ class AuthorizedSourceExecutor:
 
         website_locations = list(enrichment.get("locations") or [])
         if not website_locations and any(
-            enrichment.get(field_name)
-            for field_name in ("address", "comuna_name", "region_name")
+            enrichment.get(field_name) for field_name in ("address", "comuna_name", "region_name")
         ):
             website_locations.append(
                 {

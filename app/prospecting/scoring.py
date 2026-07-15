@@ -60,7 +60,12 @@ def classify_and_score(
     candidate: ProspectCandidate, snapshot: ProspectingRunSnapshot
 ) -> ProspectCandidate:
     category = infer_target_type(candidate)
-    prepared = candidate.model_copy(update={"category": category})
+    review_flags = list(candidate.review_flags)
+    if category == "otro" and "target_type_unconfirmed" not in review_flags:
+        review_flags.append("target_type_unconfirmed")
+    prepared = candidate.model_copy(
+        update={"category": category, "review_flags": tuple(review_flags)}
+    )
     score = score_candidate(prepared, snapshot)
     provenance = {
         **candidate.derived_provenance,
@@ -80,6 +85,4 @@ def classify_and_score(
             ),
         ),
     }
-    return prepared.model_copy(
-        update={"score": score, "derived_provenance": provenance}
-    )
+    return prepared.model_copy(update={"score": score, "derived_provenance": provenance})

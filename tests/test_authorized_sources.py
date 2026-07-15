@@ -13,7 +13,7 @@ from app.prospecting.contracts import (
     SourceName,
     Territory,
 )
-from app.prospecting.sources import AuthorizedSourceExecutor
+from app.prospecting.sources import AuthorizedSourceExecutor, build_google_query_plan
 from app.prospecting.scoring import classify_and_score
 from app.prospecting.store import WorkerTask, scope_candidate_locations
 from app.prospecting.validation import (
@@ -90,7 +90,7 @@ def test_name_affinity_allows_probable_company_website() -> None:
 
 
 @pytest.mark.asyncio
-async def test_google_details_are_requested_only_after_hvac_and_geo_prefilter(monkeypatch) -> None:
+async def test_google_expansion_deduplicates_and_keeps_generic_geo_matches(monkeypatch) -> None:
     address = [
         {"types": ["administrative_area_level_1"], "longText": "Región Metropolitana de Santiago"},
         {"types": ["administrative_area_level_3"], "longText": "Santiago"},
@@ -190,8 +190,25 @@ async def test_google_details_are_requested_only_after_hvac_and_geo_prefilter(mo
 
     candidates = await executor.search(task, snapshot)
 
-    assert len(candidates) == 1
-    assert FakeGoogle.details_calls == ["valid"]
+    assert len(candidates) == 2
+    assert FakeGoogle.details_calls == ["valid", "irrelevant"]
+    assert candidates.metrics == {
+        "queries_planned": 6,
+        "queries_executed": 6,
+        "raw_results": 18,
+        "unique_results": 3,
+        "outside_territory_discovery": 1,
+        "details_requested": 2,
+        "candidates_prepared": 2,
+        "estimated_google_cost_usd": 0.232,
+        "budget_limited": False,
+        "budget_reason": None,
+        "budget_alert": False,
+        "run_spend_usd": 0.232,
+        "daily_spend_usd": 0.232,
+        "monthly_spend_usd": 0.232,
+        "run_budget_usd": 10.0,
+    }
     prepared = scope_candidate_locations(
         sanitize_unsubstantiated_external_fields(classify_and_score(candidates[0], snapshot)),
         snapshot,
@@ -213,6 +230,50 @@ async def test_google_details_are_requested_only_after_hvac_and_geo_prefilter(mo
         "locations[0].comuna_code",
         "locations[0].address",
     }.issubset(permanent_fields)
+
+
+def test_google_query_plan_expands_target_intents_without_duplicates() -> None:
+    task = WorkerTask(
+        id="task-plan",
+        run_id="run-plan",
+        source=SourceName.google_places,
+        keyword="aire acondicionado",
+        region_code="13",
+        region_name="Metropolitana de Santiago",
+        comuna_code="13101",
+        comuna_name="Santiago",
+        max_results=20,
+        attempt_count=1,
+        max_attempts=3,
+    )
+    snapshot = ProspectingRunSnapshot(
+        crm_run_id="run-plan",
+        campaign_version=1,
+        requested_by="admin",
+        campaign=ProspectingCampaign(
+            crm_campaign_id="campaign-plan",
+            name="Masiva",
+            territories=(
+                Territory(
+                    region_code="13",
+                    region_name="Metropolitana de Santiago",
+                    comuna_code="13101",
+                    comuna_name="Santiago",
+                ),
+            ),
+            keywords=("aire acondicionado",),
+            sources=(SourceName.google_places,),
+            target_types=("tienda comercial", "tecnico"),
+        ),
+    )
+
+    queries = build_google_query_plan(task, snapshot, max_queries=6)
+
+    assert len(queries) == 6
+    assert len({query.casefold() for query in queries}) == 6
+    assert queries[0].startswith("aire acondicionado en Santiago")
+    assert any("tienda de aire acondicionado" in query for query in queries)
+    assert any("servicio tecnico de aire acondicionado" in query for query in queries)
 
 
 @pytest.mark.asyncio
@@ -337,9 +398,7 @@ async def test_brave_service_area_mention_does_not_prove_business_domicile(monke
     )
 
     candidates = await executor._brave(task)
-    prepared = sanitize_unsubstantiated_external_fields(
-        classify_and_score(candidates[0], snapshot)
-    )
+    prepared = sanitize_unsubstantiated_external_fields(classify_and_score(candidates[0], snapshot))
 
     assert prepared.location.region_code is None
     assert prepared.location.comuna_code is None

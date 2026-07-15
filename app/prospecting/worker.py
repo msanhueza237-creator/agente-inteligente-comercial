@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from pydantic import TypeAdapter
 
+from app.config import get_settings
 from app.crm.port import (
     CRMIdempotencyConflict,
     CRMLeaseLostError,
@@ -25,7 +26,8 @@ from app.prospecting.contracts import (
     RunEvent,
     RunStatus,
 )
-from app.prospecting.sources import SourceExecutor
+from app.prospecting.budget import estimate_google_run
+from app.prospecting.sources import SourceExecutor, SourceSearchResult
 from app.prospecting.scoring import classify_and_score
 from app.prospecting.store import (
     OutboxEnvelope,
@@ -140,7 +142,7 @@ class ProspectingWorker:
                         continue
                     status = (
                         RunStatus.partial
-                        if summary.failed or summary.dead_letters
+                        if summary.failed or summary.dead_letters or summary.budget_limited
                         else RunStatus.completed
                     )
                     await self._complete(local_run_id, claim, status)
@@ -226,6 +228,11 @@ class ProspectingWorker:
         task_lease_lost = asyncio.Event()
         task_heartbeat = asyncio.create_task(self._task_heartbeat(task, task_lease_lost))
         try:
+            cost_estimate = (
+                estimate_google_run(claim.snapshot, get_settings())
+                if task.source.value == "google_places"
+                else {}
+            )
             await self.store.save_event(
                 local_run_id,
                 task,
@@ -240,7 +247,15 @@ class ProspectingWorker:
                     task_status="running",
                     stage="task_started",
                     message=f"Consultando {task.source.value} en {task.comuna_name}",
-                    metrics={"attempt": task.attempt_count},
+                    metrics={
+                        "attempt": task.attempt_count,
+                        **cost_estimate,
+                        "run_budget_usd": get_settings().google_places_run_budget_usd,
+                        "daily_budget_usd": get_settings().google_places_daily_budget_usd,
+                        "budget_alert_percent": int(
+                            get_settings().google_places_budget_alert_ratio * 100
+                        ),
+                    },
                 ),
             )
             if not await self._deliver_outbox(local_run_id, claim):
@@ -248,15 +263,21 @@ class ProspectingWorker:
                 return
             if cancel_requested.is_set():
                 return
-            candidates = await self._search_until_stopped(
+            search_result = await self._search_until_stopped(
                 task,
                 claim,
                 task_lease_lost,
                 lease_lost,
                 cancel_requested,
             )
-            if candidates is None:
+            if search_result is None:
                 return
+            if isinstance(search_result, SourceSearchResult):
+                candidates = list(search_result.candidates)
+                source_metrics = dict(search_result.metrics)
+            else:
+                candidates = list(search_result)
+                source_metrics = {}
             qualified: list[ProspectCandidate] = []
             rejection_counts: dict[str, int] = {}
             for candidate in candidates:
@@ -269,12 +290,14 @@ class ProspectingWorker:
                     for reason in result.reasons:
                         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
 
-            saved = await self.store.save_candidates(local_run_id, task, qualified)
+            limited = max(0, len(qualified) - task.max_results)
+            selected = qualified[: task.max_results]
+            saved = await self.store.save_candidates(local_run_id, task, selected)
             await self.store.finish_task(
                 task.id,
                 self.worker_id,
                 results=len(saved),
-                rejected=len(candidates) - len(qualified),
+                rejected=len(candidates) - len(qualified) + limited,
             )
             await self.store.save_event(
                 local_run_id,
@@ -288,14 +311,26 @@ class ProspectingWorker:
                     comuna_code=task.comuna_code,
                     comuna_name=task.comuna_name,
                     task_status="completed",
+                    level=(
+                        EventLevel.warning
+                        if source_metrics.get("budget_limited")
+                        else EventLevel.info
+                    ),
                     stage="task_completed",
                     message=(
                         f"{task.source.value}: {task.keyword} en {task.comuna_name} completada"
                     ),
                     metrics={
+                        **source_metrics,
                         "results_found": len(candidates),
+                        "results_qualified": len(qualified),
                         "results_accepted": len(saved),
                         "results_discarded": len(candidates) - len(qualified),
+                        "results_limited": limited,
+                        "type_unconfirmed": sum(
+                            "target_type_unconfirmed" in candidate.review_flags
+                            for candidate in selected
+                        ),
                         **rejection_counts,
                     },
                 ),
@@ -334,7 +369,7 @@ class ProspectingWorker:
         task_lease_lost: asyncio.Event,
         lease_lost: asyncio.Event,
         cancel_requested: asyncio.Event,
-    ) -> list[ProspectCandidate] | None:
+    ) -> SourceSearchResult | list[ProspectCandidate] | None:
         """Cancel an in-flight source at its next await when work must stop.
 
         Authorized connectors await between discovery, each details request,
@@ -351,11 +386,7 @@ class ProspectingWorker:
                 [source_call, *stop_waiters],
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if (
-                task_lease_lost.is_set()
-                or lease_lost.is_set()
-                or cancel_requested.is_set()
-            ):
+            if task_lease_lost.is_set() or lease_lost.is_set() or cancel_requested.is_set():
                 if not source_call.done():
                     source_call.cancel()
                 await asyncio.gather(source_call, return_exceptions=True)
@@ -456,9 +487,7 @@ class ProspectingWorker:
             return
         raise ValueError(f"unsupported terminal outbox kind: {message.kind}")
 
-    async def _finalize_outbox_delivery(
-        self, local_run_id: str, message: OutboxEnvelope
-    ) -> None:
+    async def _finalize_outbox_delivery(self, local_run_id: str, message: OutboxEnvelope) -> None:
         if message.kind == "complete":
             report = CompletionReport.model_validate(message.payload)
             await self.store.finalize_terminal_outbox(
