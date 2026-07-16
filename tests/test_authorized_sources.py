@@ -341,6 +341,25 @@ def test_market_coverage_query_plan_interleaves_commercial_roles() -> None:
     assert any("repuestos de refrigeracion comercial" in query for query in queries)
 
 
+def test_market_radar_uses_broad_commercial_intents_without_company_names() -> None:
+    from app.prospecting.sources import build_brave_market_query_plan
+
+    task = WorkerTask(
+        id="radar", run_id="run", source=SourceName.brave_search,
+        keyword="refrigeracion comercial", region_code="13",
+        region_name="Metropolitana de Santiago", comuna_code="13101",
+        comuna_name="Santiago", max_results=20, attempt_count=1, max_attempts=3,
+    )
+    queries = build_brave_market_query_plan(task, max_queries=8)
+
+    assert len(queries) == 8
+    assert any("distribuidor" in query for query in queries)
+    assert any("mayorista" in query for query in queries)
+    assert any("importador" in query for query in queries)
+    assert any("marcas catalogo" in query for query in queries)
+    assert not any("acondipart" in query.casefold() for query in queries)
+
+
 @pytest.mark.asyncio
 async def test_email_only_official_enrichment_is_visible_but_not_importable(monkeypatch) -> None:
     task = WorkerTask(
@@ -473,7 +492,7 @@ async def test_brave_service_area_mention_does_not_prove_business_domicile(monke
         ),
     )
 
-    candidates = await executor._brave(task)
+    candidates = await executor._brave(task, snapshot)
     prepared = sanitize_unsubstantiated_external_fields(classify_and_score(candidates[0], snapshot))
 
     assert prepared.location.region_code is None

@@ -181,7 +181,8 @@ class StagedDiscoverySource:
             ).model_copy(update={"provider_ids": {"brave_search": "brave-new"}}),
         ]
 
-    async def enrich_discovered(self, candidate, task):
+    async def enrich_discovered(self, candidate, task, snapshot=None):
+        del snapshot
         del task
         self.enriched.append(candidate.name)
         return candidate

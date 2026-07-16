@@ -147,6 +147,22 @@ def test_market_signals_classify_and_prioritize_replacement_distributor(snapshot
     assert prepared.score is not None and prepared.score >= 75
 
 
+def test_market_score_rewards_repeated_discovery_and_commercial_reach(snapshot) -> None:
+    prospect = candidate(
+        name="Distribuidora HVAC Nacional",
+        description="Mayorista importador de repuestos de refrigeracion",
+        website="https://distribuidor-hvac.cl",
+        phone="+56223456789",
+        brands=("Copeland", "Danfoss", "Emerson"),
+        market_signals={"query_hits": 5, "best_rank": 2, "radar_mode": True},
+    )
+
+    prepared = classify_and_score(prospect, snapshot)
+
+    assert prepared.market_score is not None and prepared.market_score >= 70
+    assert prepared.market_score != prepared.score
+
+
 def test_google_generic_type_is_rejected_without_hvac_evidence(snapshot) -> None:
     restricted = snapshot.model_copy(
         update={"campaign": snapshot.campaign.model_copy(update={"target_types": ("tecnico",)})}

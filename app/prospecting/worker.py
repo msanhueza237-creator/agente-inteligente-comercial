@@ -323,7 +323,7 @@ class ProspectingWorker:
                     enrich is not None
                     and SourceName.official_website in claim.snapshot.campaign.sources
                 ):
-                    novel = [await enrich(candidate, task) for candidate in novel]
+                    novel = [await enrich(candidate, task, claim.snapshot) for candidate in novel]
                 candidates = [*google_matches, *novel]
                 source_metrics.update(
                     {

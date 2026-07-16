@@ -32,6 +32,7 @@ from app.prospecting.contracts import (
     SourceName,
 )
 from app.prospecting.budget import GooglePlacesBudget, MemoryGooglePlacesBudget
+from app.prospecting.dedup import merge_exact_candidate
 from app.prospecting.store import WorkerTask
 from app.prospecting.validation import normalize_geo
 from app.prospecting.validation import is_hvac_relevant
@@ -197,6 +198,31 @@ def build_google_query_plan(
     return tuple(unique)
 
 
+def is_market_radar(snapshot: ProspectingRunSnapshot) -> bool:
+    targets = set(snapshot.campaign.target_types)
+    return bool(targets & {"distribuidor", "tienda comercial", "competencia"}) and not bool(
+        targets & {"tecnico", "instalador grande"}
+    )
+
+
+def build_brave_market_query_plan(task: WorkerTask, *, max_queries: int) -> tuple[str, ...]:
+    region = task.region_name or task.comuna_name
+    keyword = task.keyword
+    intents = (
+        f'"{keyword}" distribuidor Chile',
+        f'"{keyword}" mayorista Chile',
+        f'"{keyword}" importador Chile',
+        f'"{keyword}" repuestos Chile',
+        f'"{keyword}" tienda {region} Chile',
+        f'"{keyword}" proveedor {region} Chile',
+        f'"{keyword}" marcas catalogo Chile',
+        f'"{keyword}" empresa refrigeracion climatizacion Chile',
+        f'"{keyword}" sucursales Chile',
+        f'"{keyword}" venta insumos HVAC Chile',
+    )
+    return intents[:max_queries]
+
+
 def _evidence(
     provider: SourceName,
     field: str,
@@ -244,11 +270,9 @@ class AuthorizedSourceExecutor:
             candidates = list(result)
             metrics = dict(result.metrics)
         elif task.source == SourceName.brave_search:
-            candidates = await self._brave(task)
-            metrics = {
-                "queries_executed": 1,
-                "unique_results": len(candidates),
-            }
+            result = await self._brave(task, snapshot)
+            candidates = list(result.candidates)
+            metrics = dict(result.metrics)
         else:
             raise SourceNotConfigured(f"{task.source.value} is not a discovery source")
 
@@ -260,15 +284,15 @@ class AuthorizedSourceExecutor:
             and SourceName.official_website in snapshot.campaign.sources
         ):
             candidates = [
-                await self._enrich_official_website(candidate, task) for candidate in candidates
+                await self._enrich_official_website(candidate, task, snapshot) for candidate in candidates
             ]
         return SourceSearchResult(tuple(candidates), metrics)
 
     async def enrich_discovered(
-        self, candidate: ProspectCandidate, task: WorkerTask
+        self, candidate: ProspectCandidate, task: WorkerTask, snapshot: ProspectingRunSnapshot | None = None
     ) -> ProspectCandidate:
         """Research one novel discovery using its public official website."""
-        return await self._enrich_official_website(candidate, task)
+        return await self._enrich_official_website(candidate, task, snapshot)
 
     async def _google(
         self, task: WorkerTask, snapshot: ProspectingRunSnapshot
@@ -496,30 +520,31 @@ class AuthorizedSourceExecutor:
             },
         )
 
-    async def _brave(self, task: WorkerTask) -> list[ProspectCandidate]:
+    async def _brave(self, task: WorkerTask, snapshot: ProspectingRunSnapshot) -> SourceSearchResult:
         if not self.settings.brave_search_api_key:
             raise SourceNotConfigured("BRAVE_SEARCH_API_KEY is not configured")
-        query = f'"{task.comuna_name}" {task.keyword} Chile'
+        radar = is_market_radar(snapshot)
+        region_territories = [item for item in snapshot.campaign.territories if item.region_code == task.region_code]
+        anchor = min((item.comuna_code for item in region_territories), default=task.comuna_code)
+        if radar and task.comuna_code != anchor:
+            return SourceSearchResult((), {"queries_executed": 0, "radar_region_anchor_skipped": True})
+        queries = build_brave_market_query_plan(
+            task, max_queries=self.settings.brave_market_queries_per_region
+        ) if radar else (f'"{task.comuna_name}" {task.keyword} Chile',)
+        results: list[tuple[int, dict]] = []
         async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
-            response = await client.get(
-                "https://api.search.brave.com/res/v1/web/search",
-                headers={
-                    "Accept": "application/json",
-                    "X-Subscription-Token": self.settings.brave_search_api_key,
-                },
-                params={
-                    "q": query,
-                    "count": min(task.max_results, 20),
-                    "country": "cl",
-                    "search_lang": "es",
-                    "safesearch": "moderate",
-                },
-            )
-        if response.status_code != 200:
-            raise RuntimeError(f"Brave Search failed with status {response.status_code}")
+            for query in queries:
+                response = await client.get(
+                    "https://api.search.brave.com/res/v1/web/search",
+                    headers={"Accept": "application/json", "X-Subscription-Token": self.settings.brave_search_api_key},
+                    params={"q": query, "count": min(task.max_results, 20), "country": "cl", "search_lang": "es", "safesearch": "moderate"},
+                )
+                if response.status_code != 200:
+                    raise RuntimeError(f"Brave Search failed with status {response.status_code}")
+                results.extend(enumerate(response.json().get("web", {}).get("results", []), start=1))
 
-        candidates: list[ProspectCandidate] = []
-        for result in response.json().get("web", {}).get("results", []):
+        by_domain: dict[str, ProspectCandidate] = {}
+        for rank, result in results:
             url = result.get("url")
             title = BeautifulSoup(result.get("title") or "", "lxml").get_text(" ").strip()
             description = (
@@ -563,6 +588,7 @@ class AuthorizedSourceExecutor:
                 location=location,
                 description=description,
                 evidence=[item for item in evidence if item is not None],
+                market_signals={"query_hits": 1, "best_rank": rank, "radar_mode": radar},
             )
             if not self._is_official_website_candidate(candidate):
                 candidate = candidate.model_copy(
@@ -573,11 +599,18 @@ class AuthorizedSourceExecutor:
                         ],
                     }
                 )
-            candidates.append(candidate)
-        return candidates
+            if radar and not candidate.website:
+                continue
+            domain = normalize_website(candidate.website or url) or provider_id
+            existing = by_domain.get(domain)
+            by_domain[domain] = merge_exact_candidate(existing, candidate) if existing else candidate
+        candidates = list(by_domain.values())
+        candidates.sort(key=lambda item: (-int(item.market_signals.get("query_hits", 0)), int(item.market_signals.get("best_rank", 99))))
+        return SourceSearchResult(tuple(candidates), {"queries_executed": len(queries), "raw_results": len(results), "unique_results": len(candidates), "market_radar": radar})
 
     async def _enrich_official_website(
-        self, candidate: ProspectCandidate, task: WorkerTask
+        self, candidate: ProspectCandidate, task: WorkerTask,
+        snapshot: ProspectingRunSnapshot | None = None,
     ) -> ProspectCandidate:
         if not self._is_official_website_candidate(candidate):
             return candidate
@@ -619,42 +652,36 @@ class AuthorizedSourceExecutor:
                 }
             )
 
+        territories = list(snapshot.campaign.territories) if snapshot else []
+        if not territories:
+            territories = [type("TaskTerritory", (), {
+                "region_code": task.region_code, "region_name": task.region_name,
+                "comuna_code": task.comuna_code, "comuna_name": task.comuna_name,
+            })()]
         prepared_locations: list[ProspectLocation] = []
-        for location in candidate.locations:
-            prepared = location
-            for website_location in website_locations:
-                website_comuna = website_location.get("comuna_name")
-                website_region = website_location.get("region_name")
-                website_address = website_location.get("address")
-                if normalize_geo(website_comuna) != normalize_geo(task.comuna_name):
-                    continue
-                if website_region and normalize_geo(website_region) != normalize_geo(
-                    task.region_name
-                ):
-                    continue
-                if (
-                    location.address
-                    and website_address
-                    and normalize_address(location.address) != normalize_address(website_address)
-                ):
-                    continue
-                prepared = location.model_copy(
-                    update={
-                        "region_code": task.region_code,
-                        "region_name": website_region or location.region_name or task.region_name,
-                        "comuna_code": task.comuna_code,
-                        "comuna_name": website_comuna,
-                        "address": website_address or location.address,
-                    }
-                )
+        for website_location in website_locations:
+            website_comuna = website_location.get("comuna_name")
+            website_region = website_location.get("region_name")
+            target = next((territory for territory in territories
+                if normalize_geo(website_comuna) == normalize_geo(territory.comuna_name)
+                and (not website_region or normalize_geo(website_region) == normalize_geo(territory.region_name))), None)
+            if target is None:
+                continue
+            prepared = ProspectLocation(
+                region_code=target.region_code, region_name=website_region or target.region_name,
+                comuna_code=target.comuna_code, comuna_name=website_comuna or target.comuna_name,
+                address=website_location.get("address"),
+            )
+            if not any(normalize_address(item.address) == normalize_address(prepared.address) and item.comuna_code == prepared.comuna_code for item in prepared_locations):
+                prepared_locations.append(prepared)
                 location_source = website_location.get("source_url") or source_url
                 add("location.region_code", prepared.region_code, url=location_source)
                 add("location.region_name", prepared.region_name, url=location_source)
                 add("location.comuna_code", prepared.comuna_code, url=location_source)
                 add("location.comuna_name", prepared.comuna_name, url=location_source)
                 add("location.address", prepared.address, url=location_source)
-                break
-            prepared_locations.append(prepared)
+        if not prepared_locations:
+            prepared_locations = list(candidate.locations)
 
         email = enrichment.get("email")
         phone = normalize_phone(enrichment.get("phone"))

@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     # Licensed web search. The key is used only by the Brave API adapter.
     brave_search_api_key: str | None = None
+    brave_market_queries_per_region: int = 8
 
     # CRM boundary. Production must use the restricted HTTP adapter; the fake
     # port is only allowed for development and tests.
@@ -72,6 +73,8 @@ class Settings(BaseSettings):
             raise ValueError("GOOGLE_PLACES_QUERIES_PER_TASK must be between 1 and 12")
         if not 1 <= self.google_places_detail_multiplier <= 3:
             raise ValueError("GOOGLE_PLACES_DETAIL_MULTIPLIER must be between 1 and 3")
+        if not 3 <= self.brave_market_queries_per_region <= 12:
+            raise ValueError("BRAVE_MARKET_QUERIES_PER_REGION must be between 3 and 12")
         if (
             min(
                 self.google_places_run_budget_usd,

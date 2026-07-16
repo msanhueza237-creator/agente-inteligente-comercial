@@ -207,6 +207,8 @@ class ProspectCandidate(BaseModel):
     brands: tuple[str, ...] = Field(default=(), max_length=50)
     evidence: list[SourceEvidence] = Field(default_factory=list, max_length=100)
     score: float | None = Field(default=None, ge=0, le=100)
+    market_score: float | None = Field(default=None, ge=0, le=100)
+    market_signals: dict[str, int | float | str | bool] = Field(default_factory=dict, max_length=30)
     derived_provenance: dict[str, DerivedProvenance] = Field(default_factory=dict)
     import_eligible: bool = False
     importable_location_indexes: tuple[int, ...] = ()

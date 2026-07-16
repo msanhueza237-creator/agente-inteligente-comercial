@@ -283,6 +283,14 @@ def merge_exact_candidate(
     updates["locations"] = merged_locations
     if incoming.score is not None:
         updates["score"] = max(canonical.score or 0, incoming.score)
+    merged_signals = dict(canonical.market_signals)
+    merged_signals["query_hits"] = int(canonical.market_signals.get("query_hits", 0) or 0) + int(incoming.market_signals.get("query_hits", 0) or 0)
+    ranks = [int(value) for value in (canonical.market_signals.get("best_rank"), incoming.market_signals.get("best_rank")) if value]
+    if ranks:
+        merged_signals["best_rank"] = min(ranks)
+    updates["market_signals"] = merged_signals
+    if incoming.market_score is not None:
+        updates["market_score"] = max(canonical.market_score or 0, incoming.market_score)
     for field in ("rut", "phone", "email", "website", "description", "category"):
         if not getattr(canonical, field) and getattr(incoming, field):
             updates[field] = getattr(incoming, field)

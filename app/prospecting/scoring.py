@@ -78,6 +78,25 @@ def score_candidate(candidate: ProspectCandidate, snapshot: ProspectingRunSnapsh
     return min(100.0, score)
 
 
+def market_importance_score(candidate: ProspectCandidate) -> float:
+    """Rank commercial reach separately from data completeness."""
+    signals = candidate.market_signals
+    query_hits = int(signals.get("query_hits", 0) or 0)
+    best_rank = int(signals.get("best_rank", 20) or 20)
+    score = min(30, query_hits * 6) + max(0, 18 - best_rank)
+    score += min(12, len(candidate.brands) * 3)
+    score += min(10, len(candidate.locations) * 3)
+    if candidate.category in {"distribuidor", "tienda comercial", "competencia"}:
+        score += 15
+    if candidate.website:
+        score += 5
+    if candidate.phone or candidate.email:
+        score += 5
+    if any(evidence.provider.value == "official_website" for evidence in candidate.evidence):
+        score += 10
+    return min(100.0, float(score))
+
+
 def classify_and_score(
     candidate: ProspectCandidate, snapshot: ProspectingRunSnapshot
 ) -> ProspectCandidate:
@@ -109,4 +128,9 @@ def classify_and_score(
             ),
         ),
     }
-    return prepared.model_copy(update={"score": score, "derived_provenance": provenance})
+    market_score = market_importance_score(prepared)
+    provenance["market_score"] = DerivedProvenance(
+        ruleset="clima_activa_market_importance_v1",
+        input_fields=("market_signals", "category", "brands", "locations", "evidence"),
+    )
+    return prepared.model_copy(update={"score": score, "market_score": market_score, "derived_provenance": provenance})
