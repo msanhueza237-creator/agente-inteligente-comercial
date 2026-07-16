@@ -680,8 +680,12 @@ class AuthorizedSourceExecutor:
                 add("location.comuna_code", prepared.comuna_code, url=location_source)
                 add("location.comuna_name", prepared.comuna_name, url=location_source)
                 add("location.address", prepared.address, url=location_source)
+        matched_official_location = bool(prepared_locations)
         if not prepared_locations:
             prepared_locations = list(candidate.locations)
+        review_flags = list(candidate.review_flags)
+        if website_locations and not matched_official_location and "official_location_conflict" not in review_flags:
+            review_flags.append("official_location_conflict")
 
         email = enrichment.get("email")
         phone = normalize_phone(enrichment.get("phone"))
@@ -718,6 +722,7 @@ class AuthorizedSourceExecutor:
                     **({"official_website": provider_id} if provider_id else {}),
                 },
                 "evidence": evidence,
+                "review_flags": tuple(review_flags),
             }
         )
 
@@ -725,29 +730,11 @@ class AuthorizedSourceExecutor:
         """Investigate one persisted candidate without rerunning discovery."""
 
         prepared = candidate
-        website_discovered = False
-        if not self._is_official_website_candidate(prepared):
-            website = await self._find_official_website(prepared)
-            if website:
-                provider_id = normalize_website(website)
-                evidence = [
-                    *prepared.evidence,
-                    SourceEvidence(
-                        provider=SourceName.brave_search,
-                        source_url=website,
-                        provider_record_id=website,
-                        field="website",
-                        value=website,
-                    ),
-                ]
-                prepared = prepared.model_copy(
-                    update={
-                        "website": website,
-                        "provider_ids": {**prepared.provider_ids, "brave_search": website, **({"official_website": provider_id} if provider_id else {})},
-                        "evidence": evidence,
-                    }
-                )
-                website_discovered = True
+        website_available = self._is_official_website_candidate(prepared)
+        if not website_available:
+            prepared = prepared.model_copy(update={
+                "review_flags": tuple(dict.fromkeys((*prepared.review_flags, "official_site_missing")))
+            })
 
         location = prepared.location
         task = WorkerTask(
@@ -789,7 +776,9 @@ class AuthorizedSourceExecutor:
         return enriched, {
             "hvac_relevant": is_hvac_relevant(enriched),
             "website_found": bool(enriched.website),
-            "website_discovered_by_brave": website_discovered,
+            "website_discovered_by_brave": False,
+            "brave_queries_used": 0,
+            "official_site_missing": not website_available,
             "official_fields_added": max(0, len(enriched.evidence) - before_evidence),
             "emails_found": int(bool(enriched.email)),
             "phones_found": int(bool(enriched.phone)),

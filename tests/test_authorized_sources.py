@@ -499,3 +499,23 @@ async def test_brave_service_area_mention_does_not_prove_business_domicile(monke
     assert prepared.location.comuna_code is None
     assert not any(evidence.field.startswith("location.") for evidence in prepared.evidence)
     assert "outside_requested_territory" in validate_candidate(prepared, snapshot).reasons
+
+
+@pytest.mark.asyncio
+async def test_post_enrichment_never_uses_brave_to_find_a_missing_site(monkeypatch) -> None:
+    executor = AuthorizedSourceExecutor()
+    executor.settings = SimpleNamespace(brave_search_api_key="configured")
+    candidate = ProspectCandidate(
+        name="Empresa sin sitio",
+        location=ProspectLocation(region_code="13", region_name="Metropolitana de Santiago", comuna_code="13101", comuna_name="Santiago"),
+    )
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("post enrichment must not call Brave")
+
+    monkeypatch.setattr(executor, "_find_official_website", forbidden)
+    enriched, summary = await executor.enrich_existing(candidate, "run-no-brave")
+
+    assert "official_site_missing" in enriched.review_flags
+    assert summary["brave_queries_used"] == 0
+    assert summary["official_site_missing"] is True
