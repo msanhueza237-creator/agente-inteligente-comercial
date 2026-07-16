@@ -4,6 +4,7 @@ import uuid
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Mapping
 from typing import Protocol
 
 from sqlalchemy import func, select, text, update
@@ -13,6 +14,7 @@ from app.config import Settings
 from app.db.models import (
     GoogleMapsQueryLog,
     BraveSearchQueryLog,
+    BraveUsageReconciliation,
     PlacesFieldTier,
     PlacesQueryType,
 )
@@ -250,6 +252,27 @@ class BraveBudgetReservation:
     log_id: str | None = None
 
 
+def brave_provider_usage_from_headers(
+    headers: Mapping[str, str],
+) -> tuple[int, int, int | None] | None:
+    """Return monthly used, limit and reset from Brave's comma-separated headers."""
+
+    def last_integer(name: str) -> int | None:
+        value = headers.get(name)
+        if not value:
+            return None
+        try:
+            return int(value.split(",")[-1].strip())
+        except ValueError:
+            return None
+
+    limit = last_integer("X-RateLimit-Limit")
+    remaining = last_integer("X-RateLimit-Remaining")
+    if limit is None or limit <= 0 or remaining is None:
+        return None
+    return max(0, limit - remaining), limit, last_integer("X-RateLimit-Reset")
+
+
 class PersistentBraveSearchBudget:
     """Atomically reserves each Brave request before sending it."""
 
@@ -259,20 +282,48 @@ class PersistentBraveSearchBudget:
         self.settings = settings
         self.sessions = sessions
 
+    async def _effective_usage(self, session: AsyncSession, now: datetime) -> tuple[int, float, BraveUsageReconciliation | None]:
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        reconciliation = await session.get(BraveUsageReconciliation, now.strftime("%Y-%m"))
+        local_since = reconciliation.observed_at if reconciliation else month_start
+        count, spend = (await session.execute(select(
+            func.count(BraveSearchQueryLog.id),
+            func.coalesce(func.sum(BraveSearchQueryLog.cost_estimate_usd), 0),
+        ).where(BraveSearchQueryLog.created_at >= local_since))).one()
+        base_queries = reconciliation.provider_queries if reconciliation else 0
+        base_spend = float(reconciliation.provider_spend_usd) if reconciliation else 0.0
+        return base_queries + int(count), base_spend + float(spend), reconciliation
+
+    async def reconcile_provider_usage(self, *, provider_queries: int, provider_limit_queries: int | None,
+                                       provider_remaining_queries: int | None, reset_seconds: int | None) -> dict[str, float | int | str]:
+        now = datetime.now(timezone.utc)
+        month_key = now.strftime("%Y-%m")
+        provider_spend = provider_queries * self.settings.brave_search_cost_per_query_usd
+        async with self.sessions() as session, session.begin():
+            current = await session.get(BraveUsageReconciliation, month_key)
+            if current is None:
+                current = BraveUsageReconciliation(month_key=month_key, provider_queries=provider_queries,
+                    provider_spend_usd=provider_spend, provider_limit_queries=provider_limit_queries,
+                    provider_remaining_queries=provider_remaining_queries, reset_seconds=reset_seconds,
+                    observed_at=now)
+                session.add(current)
+            elif provider_queries >= current.provider_queries:
+                current.provider_queries = provider_queries
+                current.provider_spend_usd = provider_spend
+                current.provider_limit_queries = provider_limit_queries
+                current.provider_remaining_queries = provider_remaining_queries
+                current.reset_seconds = reset_seconds
+                current.observed_at = now
+        return await self.monthly_summary()
+
     async def reserve(self, *, run_id: str, task_id: str, query: str, monthly_limit_usd: float,
                       query_kind: str = "discovery", max_social_queries: int = 0) -> BraveBudgetReservation:
         now = datetime.now(timezone.utc)
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         cost = self.settings.brave_search_cost_per_query_usd
         async with self.sessions() as session, session.begin():
             if session.bind is not None and session.bind.dialect.name == "postgresql":
                 await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": self._ADVISORY_LOCK_KEY})
-            statement = select(
-                func.count(BraveSearchQueryLog.id),
-                func.coalesce(func.sum(BraveSearchQueryLog.cost_estimate_usd), 0),
-            ).where(BraveSearchQueryLog.created_at >= month_start)
-            count, spend = (await session.execute(statement)).one()
-            spend = float(spend)
+            count, spend, _ = await self._effective_usage(session, now)
             if query_kind == "social":
                 social_count = int((await session.execute(select(func.count(BraveSearchQueryLog.id)).where(
                     BraveSearchQueryLog.crm_run_id == run_id,
@@ -302,16 +353,16 @@ class PersistentBraveSearchBudget:
             await session.execute(update(BraveSearchQueryLog).where(
                 BraveSearchQueryLog.id == uuid.UUID(reservation.log_id)).values(results_count=results_count))
 
-    async def monthly_summary(self, monthly_limit_usd: float | None = None) -> dict[str, float | int]:
+    async def monthly_summary(self, monthly_limit_usd: float | None = None) -> dict[str, float | int | str]:
         limit = monthly_limit_usd or self.settings.brave_search_monthly_budget_usd
         now = datetime.now(timezone.utc)
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         async with self.sessions() as session:
-            count, spend = (await session.execute(select(
-                func.count(BraveSearchQueryLog.id),
-                func.coalesce(func.sum(BraveSearchQueryLog.cost_estimate_usd), 0),
-            ).where(BraveSearchQueryLog.created_at >= month_start))).one()
-        spend = float(spend)
+            count, spend, reconciliation = await self._effective_usage(session, now)
         return {"monthly_queries": int(count), "monthly_spend_usd": round(spend, 4),
                 "monthly_limit_usd": limit, "remaining_usd": round(max(0.0, limit - spend), 4),
-                "free_credit_usd": self.settings.brave_search_free_credit_usd}
+                "free_credit_usd": self.settings.brave_search_free_credit_usd,
+                "provider_queries": reconciliation.provider_queries if reconciliation else 0,
+                "provider_spend_usd": round(float(reconciliation.provider_spend_usd), 4) if reconciliation else 0.0,
+                "provider_limit_queries": reconciliation.provider_limit_queries if reconciliation and reconciliation.provider_limit_queries else 0,
+                "provider_remaining_queries": reconciliation.provider_remaining_queries if reconciliation and reconciliation.provider_remaining_queries is not None else 0,
+                "provider_synced_at": reconciliation.observed_at.isoformat() if reconciliation else ""}

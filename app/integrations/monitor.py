@@ -7,7 +7,7 @@ import httpx
 from app.config import Settings
 from app.crm.http import HttpCRMPort
 from app.enrichment.google_places import GooglePlacesClient
-from app.prospecting.budget import PersistentBraveSearchBudget
+from app.prospecting.budget import PersistentBraveSearchBudget, brave_provider_usage_from_headers
 
 logger = logging.getLogger("clima_activa.integrations")
 
@@ -122,7 +122,20 @@ class IntegrationMonitor:
             "free_credit_usd": getattr(self.settings, "brave_search_free_credit_usd", 5.0),
         }
         if self.brave_budget:
-            metadata.update(await self.brave_budget.monthly_summary())
+            response_headers = getattr(locals().get("response"), "headers", {})
+            provider_usage = brave_provider_usage_from_headers(response_headers)
+            if status == "connected" and provider_usage:
+                provider_queries, provider_limit, reset_seconds = provider_usage
+                metadata.update(await self.brave_budget.reconcile_provider_usage(
+                    provider_queries=provider_queries,
+                    provider_limit_queries=provider_limit,
+                    provider_remaining_queries=max(0, provider_limit - provider_queries),
+                    reset_seconds=reset_seconds,
+                ))
+                metadata["usage_source"] = "brave_rate_limit_headers"
+            else:
+                metadata.update(await self.brave_budget.monthly_summary())
+                metadata["usage_source"] = "local_ledger"
         await self.crm.report_integration_status(
             worker_id=self.settings.crm_worker_id,
             check_id=check_id,

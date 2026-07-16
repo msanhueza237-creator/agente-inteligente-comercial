@@ -31,7 +31,12 @@ from app.prospecting.contracts import (
     SourceEvidence,
     SourceName,
 )
-from app.prospecting.budget import GooglePlacesBudget, MemoryGooglePlacesBudget, PersistentBraveSearchBudget
+from app.prospecting.budget import (
+    GooglePlacesBudget,
+    MemoryGooglePlacesBudget,
+    PersistentBraveSearchBudget,
+    brave_provider_usage_from_headers,
+)
 from app.prospecting.dedup import merge_exact_candidate
 from app.prospecting.store import WorkerTask
 from app.prospecting.validation import normalize_geo
@@ -567,6 +572,17 @@ class AuthorizedSourceExecutor:
                 )
                 if response.status_code != 200:
                     raise RuntimeError(f"Brave Search failed with status {response.status_code}")
+                if self.brave_budget:
+                    provider_usage = brave_provider_usage_from_headers(response.headers)
+                    if provider_usage:
+                        provider_queries, provider_limit, reset_seconds = provider_usage
+                        summary = await self.brave_budget.reconcile_provider_usage(
+                            provider_queries=provider_queries,
+                            provider_limit_queries=provider_limit,
+                            provider_remaining_queries=max(0, provider_limit - provider_queries),
+                            reset_seconds=reset_seconds,
+                        )
+                        monthly_spend = float(summary["monthly_spend_usd"])
                 web_results = response.json().get("web", {}).get("results", [])
                 queries_executed += 1
                 social_queries_executed += int(query_kind == "social")

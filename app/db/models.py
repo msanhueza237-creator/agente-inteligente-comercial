@@ -351,6 +351,19 @@ class BraveSearchQueryLog(Base):
     created_at: Mapped[datetime] = _created_at()
 
 
+class BraveUsageReconciliation(Base):
+    __tablename__ = "brave_usage_reconciliation"
+
+    month_key: Mapped[str] = mapped_column(String(7), primary_key=True)
+    provider_queries: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_spend_usd: Mapped[float] = mapped_column(Numeric(8, 4), nullable=False)
+    provider_limit_queries: Mapped[int | None] = mapped_column(Integer)
+    provider_remaining_queries: Mapped[int | None] = mapped_column(Integer)
+    reset_seconds: Mapped[int | None] = mapped_column(Integer)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = _updated_at()
+
+
 class User(Base):
     __tablename__ = "users"
 
