@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import (
@@ -203,6 +203,10 @@ class WorkerStore(Protocol):
     async def save_candidates(
         self, run_id: str, task: WorkerTask, candidates: list[ProspectCandidate]
     ) -> list[ProspectCandidate]: ...
+
+    async def partition_discoveries(
+        self, run_id: str, candidates: list[ProspectCandidate]
+    ) -> tuple[list[ProspectCandidate], list[ProspectCandidate]]: ...
 
     async def save_event(self, run_id: str, task: WorkerTask | None, event: RunEvent) -> None: ...
 
@@ -644,7 +648,15 @@ class SQLWorkerStore:
                             ),
                         ),
                     )
-                    .order_by(ProspectingTask.created_at, ProspectingTask.id)
+                    .order_by(
+                        case(
+                            (ProspectingTask.source == SourceName.google_places.value, 0),
+                            (ProspectingTask.source == SourceName.brave_search.value, 1),
+                            else_=2,
+                        ),
+                        ProspectingTask.created_at,
+                        ProspectingTask.id,
+                    )
                     .with_for_update(skip_locked=True)
                     .limit(1)
                 )
@@ -669,6 +681,33 @@ class SQLWorkerStore:
                 attempt_count=task.attempt_count,
                 max_attempts=task.max_attempts,
             )
+
+    async def partition_discoveries(
+        self, run_id: str, candidates: list[ProspectCandidate]
+    ) -> tuple[list[ProspectCandidate], list[ProspectCandidate]]:
+        """Return novel hits and already-known hits merged with this run's evidence."""
+        async with self._sessions() as session:
+            rows = (
+                await session.execute(
+                    select(ProspectingCandidateRecord).where(
+                        ProspectingCandidateRecord.run_id == uuid.UUID(run_id)
+                    )
+                )
+            ).scalars().all()
+            known = [ProspectCandidate.model_validate(row.payload) for row in rows]
+
+        novel: list[ProspectCandidate] = []
+        merged: list[ProspectCandidate] = []
+        for incoming in candidates:
+            match = match_candidate(incoming, known)
+            existing = next(
+                (item for item in known if item.candidate_id == match.matched_id), None
+            )
+            if match.disposition == DedupDisposition.exact_match and existing is not None:
+                merged.append(merge_exact_candidate(existing, incoming))
+            else:
+                novel.append(incoming)
+        return novel, merged
 
     async def heartbeat_task(self, task_id: str, worker_id: str, lease_seconds: int) -> bool:
         now = now_utc()
@@ -1321,7 +1360,15 @@ class MemoryWorkerStore:
     ) -> WorkerTask | None:
         now = now_utc()
         async with self._lock:
-            for record in self.runs[run_id].tasks.values():
+            source_priority = {
+                SourceName.google_places: 0,
+                SourceName.brave_search: 1,
+            }
+            records = sorted(
+                self.runs[run_id].tasks.values(),
+                key=lambda item: source_priority.get(item.task.source, 2),
+            )
+            for record in records:
                 if (
                     record.status == "running"
                     and record.lease_expires_at is not None
@@ -1446,6 +1493,24 @@ class MemoryWorkerStore:
                     payload=[c.model_dump(mode="json") for c in accepted],
                 )
             return accepted
+
+    async def partition_discoveries(
+        self, run_id: str, candidates: list[ProspectCandidate]
+    ) -> tuple[list[ProspectCandidate], list[ProspectCandidate]]:
+        async with self._lock:
+            known = list(self.runs[run_id].candidates.values())
+            novel: list[ProspectCandidate] = []
+            merged: list[ProspectCandidate] = []
+            for incoming in candidates:
+                match = match_candidate(incoming, known)
+                existing = next(
+                    (item for item in known if item.candidate_id == match.matched_id), None
+                )
+                if match.disposition == DedupDisposition.exact_match and existing is not None:
+                    merged.append(merge_exact_candidate(existing, incoming))
+                else:
+                    novel.append(incoming)
+            return novel, merged
 
     async def save_event(self, run_id: str, task: WorkerTask | None, event: RunEvent) -> None:
         del task

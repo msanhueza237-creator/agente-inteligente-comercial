@@ -25,6 +25,7 @@ from app.prospecting.contracts import (
     ProspectCandidate,
     RunEvent,
     RunStatus,
+    SourceName,
 )
 from app.prospecting.budget import estimate_google_run
 from app.prospecting.sources import SourceExecutor, SourceSearchResult
@@ -312,6 +313,24 @@ class ProspectingWorker:
             else:
                 candidates = list(search_result)
                 source_metrics = {}
+
+            if task.source == SourceName.brave_search:
+                novel, google_matches = await self.store.partition_discoveries(
+                    local_run_id, candidates
+                )
+                enrich = getattr(self.sources, "enrich_discovered", None)
+                if (
+                    enrich is not None
+                    and SourceName.official_website in claim.snapshot.campaign.sources
+                ):
+                    novel = [await enrich(candidate, task) for candidate in novel]
+                candidates = [*google_matches, *novel]
+                source_metrics.update(
+                    {
+                        "google_duplicates_merged": len(google_matches),
+                        "novel_brave_candidates_researched": len(novel),
+                    }
+                )
             qualified: list[ProspectCandidate] = []
             rejection_counts: dict[str, int] = {}
             for candidate in candidates:

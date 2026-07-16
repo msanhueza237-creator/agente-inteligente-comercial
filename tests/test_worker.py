@@ -160,6 +160,66 @@ class FlakySource:
         return [qualified_candidate()]
 
 
+class StagedDiscoverySource:
+    def __init__(self):
+        self.calls = []
+        self.enriched = []
+
+    async def search(self, task, snapshot):
+        del snapshot
+        self.calls.append(task.source)
+        if task.source == SourceName.google_places:
+            return [qualified_candidate(provider_id="google-one")]
+        return [
+            qualified_candidate(provider_id="brave-duplicate").model_copy(
+                update={"provider_ids": {"brave_search": "brave-duplicate"}}
+            ),
+            qualified_candidate(
+                name="Refrigeracion Nueva SpA",
+                url="https://refrigeracion-nueva.cl",
+                provider_id="brave-new",
+            ).model_copy(update={"provider_ids": {"brave_search": "brave-new"}}),
+        ]
+
+    async def enrich_discovered(self, candidate, task):
+        del task
+        self.enriched.append(candidate.name)
+        return candidate
+
+
+@pytest.mark.asyncio
+async def test_google_runs_before_brave_and_only_novel_brave_hit_is_researched() -> None:
+    crm = FakeCRMPort()
+    store = MemoryWorkerStore()
+    source = StagedDiscoverySource()
+    await crm.enqueue(
+        build_snapshot(
+            sources=(
+                SourceName.brave_search,
+                SourceName.google_places,
+                SourceName.official_website,
+            )
+        )
+    )
+    worker = ProspectingWorker(
+        crm,
+        store,
+        source,
+        config=WorkerConfig(heartbeat_seconds=60),
+    )
+
+    await worker.poll_once()
+
+    assert source.calls == [SourceName.google_places, SourceName.brave_search]
+    assert source.enriched == ["Refrigeracion Nueva SpA"]
+    remote = await crm.inspect_run("run-worker")
+    assert len(remote.candidates) == 2
+    completed = [event for event in remote.events if event.stage == "task_completed"]
+    brave_event = next(event for event in completed if event.source == SourceName.brave_search)
+    assert brave_event.metrics["google_duplicates_merged"] == 1
+    assert brave_event.metrics["novel_brave_candidates_researched"] == 1
+
+
 class BlockingSource:
     def __init__(self):
         self.started = asyncio.Event()

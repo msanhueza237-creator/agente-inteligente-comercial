@@ -252,11 +252,23 @@ class AuthorizedSourceExecutor:
         else:
             raise SourceNotConfigured(f"{task.source.value} is not a discovery source")
 
-        if SourceName.official_website in snapshot.campaign.sources:
+        # Google is the primary discovery pass. Brave is staged by the worker:
+        # exact Google matches are merged without crawling the same site again,
+        # while only genuinely new Brave hits reach official-site research.
+        if (
+            task.source == SourceName.google_places
+            and SourceName.official_website in snapshot.campaign.sources
+        ):
             candidates = [
                 await self._enrich_official_website(candidate, task) for candidate in candidates
             ]
         return SourceSearchResult(tuple(candidates), metrics)
+
+    async def enrich_discovered(
+        self, candidate: ProspectCandidate, task: WorkerTask
+    ) -> ProspectCandidate:
+        """Research one novel discovery using its public official website."""
+        return await self._enrich_official_website(candidate, task)
 
     async def _google(
         self, task: WorkerTask, snapshot: ProspectingRunSnapshot
