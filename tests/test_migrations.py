@@ -13,7 +13,7 @@ def test_legacy_0003_upgrades_convergently_to_head(monkeypatch) -> None:
     config = Config("alembic.ini", output_buffer=output)
     scripts = ScriptDirectory.from_config(config)
 
-    assert scripts.get_current_head() == "0005"
+    assert scripts.get_current_head() == "0006"
     assert scripts.get_revision("0004").down_revision == "0003"
     assert scripts.get_revision("0005").down_revision == "0004"
 

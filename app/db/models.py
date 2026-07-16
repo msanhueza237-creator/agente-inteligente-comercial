@@ -338,6 +338,19 @@ class GoogleMapsQueryLog(Base):
     created_at: Mapped[datetime] = _created_at()
 
 
+class BraveSearchQueryLog(Base):
+    __tablename__ = "brave_search_query_log"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    crm_run_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    query_kind: Mapped[str] = mapped_column(String(30), nullable=False, default="discovery")
+    query_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    results_count: Mapped[int | None] = mapped_column(Integer)
+    cost_estimate_usd: Mapped[float] = mapped_column(Numeric(8, 4), nullable=False)
+    created_at: Mapped[datetime] = _created_at()
+
+
 class User(Base):
     __tablename__ = "users"
 

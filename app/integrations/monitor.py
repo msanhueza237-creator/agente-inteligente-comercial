@@ -7,14 +7,16 @@ import httpx
 from app.config import Settings
 from app.crm.http import HttpCRMPort
 from app.enrichment.google_places import GooglePlacesClient
+from app.prospecting.budget import PersistentBraveSearchBudget
 
 logger = logging.getLogger("clima_activa.integrations")
 
 
 class IntegrationMonitor:
-    def __init__(self, crm: HttpCRMPort, settings: Settings) -> None:
+    def __init__(self, crm: HttpCRMPort, settings: Settings, brave_budget: PersistentBraveSearchBudget | None = None) -> None:
         self.crm = crm
         self.settings = settings
+        self.brave_budget = brave_budget
 
     async def poll_once(self) -> bool:
         check = await self.crm.claim_integration_check(self.settings.crm_worker_id)
@@ -114,6 +116,13 @@ class IntegrationMonitor:
                 )
 
         status, error_code, message = result
+        metadata = {
+            "cost_per_query_usd": getattr(self.settings, "brave_search_cost_per_query_usd", 0.005),
+            "monthly_limit_usd": getattr(self.settings, "brave_search_monthly_budget_usd", 5.0),
+            "free_credit_usd": getattr(self.settings, "brave_search_free_credit_usd", 5.0),
+        }
+        if self.brave_budget:
+            metadata.update(await self.brave_budget.monthly_summary())
         await self.crm.report_integration_status(
             worker_id=self.settings.crm_worker_id,
             check_id=check_id,
@@ -122,6 +131,7 @@ class IntegrationMonitor:
             status=status,
             error_code=error_code,
             message=message,
+            metadata=metadata,
         )
 
     async def _report_not_configured(self, check_id: str, provider: str, configured: bool) -> None:

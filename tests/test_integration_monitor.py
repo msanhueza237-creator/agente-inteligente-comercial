@@ -51,8 +51,13 @@ async def test_brave_connection_check_reports_connected_without_exposing_key(mon
             "configured": True,
             "status": "connected",
             "error_code": None,
-            "message": "Brave Search respondio correctamente.",
-        }
+                "message": "Brave Search respondio correctamente.",
+                "metadata": {
+                    "cost_per_query_usd": 0.005,
+                    "monthly_limit_usd": 5.0,
+                    "free_credit_usd": 5.0,
+                },
+            }
     ]
 
 

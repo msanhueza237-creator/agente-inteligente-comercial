@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.db.models import (
     GoogleMapsQueryLog,
+    BraveSearchQueryLog,
     PlacesFieldTier,
     PlacesQueryType,
 )
@@ -235,3 +237,81 @@ class PersistentGooglePlacesBudget:
                 .where(GoogleMapsQueryLog.id == uuid.UUID(reservation.log_id))
                 .values(results_count=results_count)
             )
+
+
+@dataclass(frozen=True)
+class BraveBudgetReservation:
+    allowed: bool
+    monthly_queries: int
+    monthly_spend_usd: float
+    monthly_limit_usd: float
+    remaining_usd: float
+    reason: str | None = None
+    log_id: str | None = None
+
+
+class PersistentBraveSearchBudget:
+    """Atomically reserves each Brave request before sending it."""
+
+    _ADVISORY_LOCK_KEY = 1729042202
+
+    def __init__(self, settings: Settings, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self.settings = settings
+        self.sessions = sessions
+
+    async def reserve(self, *, run_id: str, task_id: str, query: str, monthly_limit_usd: float,
+                      query_kind: str = "discovery", max_social_queries: int = 0) -> BraveBudgetReservation:
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        cost = self.settings.brave_search_cost_per_query_usd
+        async with self.sessions() as session, session.begin():
+            if session.bind is not None and session.bind.dialect.name == "postgresql":
+                await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": self._ADVISORY_LOCK_KEY})
+            statement = select(
+                func.count(BraveSearchQueryLog.id),
+                func.coalesce(func.sum(BraveSearchQueryLog.cost_estimate_usd), 0),
+            ).where(BraveSearchQueryLog.created_at >= month_start)
+            count, spend = (await session.execute(statement)).one()
+            spend = float(spend)
+            if query_kind == "social":
+                social_count = int((await session.execute(select(func.count(BraveSearchQueryLog.id)).where(
+                    BraveSearchQueryLog.crm_run_id == run_id,
+                    BraveSearchQueryLog.query_kind == "social",
+                ))).scalar_one())
+                if social_count >= max_social_queries:
+                    return BraveBudgetReservation(False, int(count), spend, monthly_limit_usd,
+                                                    max(0.0, monthly_limit_usd - spend), "social_query_limit_exhausted")
+            if spend + cost > monthly_limit_usd:
+                return BraveBudgetReservation(False, int(count), spend, monthly_limit_usd,
+                                                max(0.0, monthly_limit_usd - spend), "monthly_budget_exhausted")
+            log = BraveSearchQueryLog(
+                crm_run_id=run_id, task_id=task_id, query_kind=query_kind,
+                query_hash=hashlib.sha256(query.encode("utf-8")).hexdigest(),
+                cost_estimate_usd=cost,
+            )
+            session.add(log)
+            await session.flush()
+            projected = spend + cost
+            return BraveBudgetReservation(True, int(count) + 1, projected, monthly_limit_usd,
+                                            max(0.0, monthly_limit_usd - projected), log_id=str(log.id))
+
+    async def complete(self, reservation: BraveBudgetReservation, results_count: int) -> None:
+        if not reservation.log_id:
+            return
+        async with self.sessions() as session, session.begin():
+            await session.execute(update(BraveSearchQueryLog).where(
+                BraveSearchQueryLog.id == uuid.UUID(reservation.log_id)).values(results_count=results_count))
+
+    async def monthly_summary(self, monthly_limit_usd: float | None = None) -> dict[str, float | int]:
+        limit = monthly_limit_usd or self.settings.brave_search_monthly_budget_usd
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        async with self.sessions() as session:
+            count, spend = (await session.execute(select(
+                func.count(BraveSearchQueryLog.id),
+                func.coalesce(func.sum(BraveSearchQueryLog.cost_estimate_usd), 0),
+            ).where(BraveSearchQueryLog.created_at >= month_start))).one()
+        spend = float(spend)
+        return {"monthly_queries": int(count), "monthly_spend_usd": round(spend, 4),
+                "monthly_limit_usd": limit, "remaining_usd": round(max(0.0, limit - spend), 4),
+                "free_credit_usd": self.settings.brave_search_free_credit_usd}

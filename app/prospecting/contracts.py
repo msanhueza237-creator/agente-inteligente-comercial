@@ -129,6 +129,13 @@ class ProspectingCampaign(BaseModel):
         return self
 
 
+class BravePolicy(BaseModel):
+    monthly_limit_usd: float = Field(default=5.0, gt=0, le=1000)
+    free_credit_usd: float = Field(default=5.0, ge=0, le=1000)
+    social_search_enabled: bool = False
+    max_social_queries_per_campaign: int = Field(default=6, ge=0, le=100)
+
+
 class ProspectingRunSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -138,6 +145,7 @@ class ProspectingRunSnapshot(BaseModel):
     campaign: ProspectingCampaign
     requested_at: datetime = Field(default_factory=utc_now)
     requested_by: str = Field(min_length=1, max_length=200)
+    brave_policy: BravePolicy = Field(default_factory=BravePolicy)
 
     @model_validator(mode="after")
     def campaign_id_present(self) -> ProspectingRunSnapshot:

@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Licensed web search. The key is used only by the Brave API adapter.
     brave_search_api_key: str | None = None
     brave_market_queries_per_region: int = 8
+    brave_search_cost_per_query_usd: float = 0.005
+    brave_search_monthly_budget_usd: float = 5.0
+    brave_search_free_credit_usd: float = 5.0
 
     # CRM boundary. Production must use the restricted HTTP adapter; the fake
     # port is only allowed for development and tests.
@@ -75,6 +78,10 @@ class Settings(BaseSettings):
             raise ValueError("GOOGLE_PLACES_DETAIL_MULTIPLIER must be between 1 and 3")
         if not 3 <= self.brave_market_queries_per_region <= 12:
             raise ValueError("BRAVE_MARKET_QUERIES_PER_REGION must be between 3 and 12")
+        if min(self.brave_search_cost_per_query_usd, self.brave_search_monthly_budget_usd) <= 0:
+            raise ValueError("Brave Search cost and monthly budget must be positive")
+        if self.brave_search_free_credit_usd < 0:
+            raise ValueError("BRAVE_SEARCH_FREE_CREDIT_USD cannot be negative")
         if (
             min(
                 self.google_places_run_budget_usd,

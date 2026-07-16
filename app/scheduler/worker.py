@@ -9,7 +9,7 @@ from app.crm.http import HttpCRMPort
 from app.crm.port import CRMPort
 from app.db.base import async_session_factory
 from app.integrations.monitor import IntegrationMonitor
-from app.prospecting.budget import PersistentGooglePlacesBudget
+from app.prospecting.budget import PersistentGooglePlacesBudget, PersistentBraveSearchBudget
 from app.prospecting.sources import AuthorizedSourceExecutor
 from app.prospecting.retention import purge_expired_source_data
 from app.prospecting.store import SQLWorkerStore
@@ -32,10 +32,11 @@ def build_crm_port(settings) -> CRMPort:
 def build_worker() -> ProspectingWorker:
     settings = get_settings()
     google_budget = PersistentGooglePlacesBudget(settings, async_session_factory)
+    brave_budget = PersistentBraveSearchBudget(settings, async_session_factory)
     return ProspectingWorker(
         crm=build_crm_port(settings),
         store=SQLWorkerStore(async_session_factory),
-        sources=AuthorizedSourceExecutor(budget=google_budget),
+        sources=AuthorizedSourceExecutor(budget=google_budget, brave_budget=brave_budget),
         worker_id=settings.crm_worker_id,
         config=WorkerConfig(
             poll_seconds=settings.worker_poll_seconds,
@@ -57,7 +58,8 @@ async def main() -> None:
     retention_task = asyncio.create_task(_retention_loop())
     integration_task = None
     if isinstance(worker.crm, HttpCRMPort):
-        integration_task = asyncio.create_task(_integration_loop(worker.crm, settings))
+        brave_budget = PersistentBraveSearchBudget(settings, async_session_factory)
+        integration_task = asyncio.create_task(_integration_loop(worker.crm, settings, brave_budget))
     try:
         await worker.run_forever()
     finally:
@@ -71,8 +73,8 @@ async def main() -> None:
         )
 
 
-async def _integration_loop(crm: HttpCRMPort, settings) -> None:
-    monitor = IntegrationMonitor(crm, settings)
+async def _integration_loop(crm: HttpCRMPort, settings, brave_budget) -> None:
+    monitor = IntegrationMonitor(crm, settings, brave_budget)
     while True:
         try:
             await monitor.poll_once()

@@ -31,7 +31,7 @@ from app.prospecting.contracts import (
     SourceEvidence,
     SourceName,
 )
-from app.prospecting.budget import GooglePlacesBudget, MemoryGooglePlacesBudget
+from app.prospecting.budget import GooglePlacesBudget, MemoryGooglePlacesBudget, PersistentBraveSearchBudget
 from app.prospecting.dedup import merge_exact_candidate
 from app.prospecting.store import WorkerTask
 from app.prospecting.validation import normalize_geo
@@ -258,9 +258,10 @@ def _location_for_google(place: dict, task: WorkerTask) -> ProspectLocation:
 class AuthorizedSourceExecutor:
     """Only licensed APIs plus the company's own public website are used."""
 
-    def __init__(self, budget: GooglePlacesBudget | None = None) -> None:
+    def __init__(self, budget: GooglePlacesBudget | None = None, brave_budget: PersistentBraveSearchBudget | None = None) -> None:
         self.settings = get_settings()
         self.budget = budget or MemoryGooglePlacesBudget(self.settings)
+        self.brave_budget = brave_budget
 
     async def search(
         self, task: WorkerTask, snapshot: ProspectingRunSnapshot
@@ -531,9 +532,34 @@ class AuthorizedSourceExecutor:
         queries = build_brave_market_query_plan(
             task, max_queries=self.settings.brave_market_queries_per_region
         ) if radar else (f'"{task.comuna_name}" {task.keyword} Chile',)
+        query_plan: list[tuple[str, str]] = [(query, "discovery") for query in queries]
+        if snapshot.brave_policy.social_search_enabled and task.comuna_code == anchor:
+            social_limit = snapshot.brave_policy.max_social_queries_per_campaign
+            social_queries = (
+                f'site:instagram.com {task.keyword} "{task.region_name or task.comuna_name}" Chile',
+                f'site:facebook.com {task.keyword} "{task.region_name or task.comuna_name}" Chile',
+            )
+            query_plan.extend((query, "social") for query in social_queries[:social_limit])
         results: list[tuple[int, dict]] = []
+        budget_limited = False
+        monthly_spend = 0.0
+        queries_executed = 0
         async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
-            for query in queries:
+            social_queries_executed = 0
+            for query, query_kind in query_plan:
+                reservation = None
+                if self.brave_budget:
+                    reservation = await self.brave_budget.reserve(
+                        run_id=snapshot.crm_run_id, task_id=task.id, query=query,
+                        monthly_limit_usd=snapshot.brave_policy.monthly_limit_usd, query_kind=query_kind,
+                        max_social_queries=snapshot.brave_policy.max_social_queries_per_campaign,
+                    )
+                    monthly_spend = reservation.monthly_spend_usd
+                    if not reservation.allowed:
+                        if reservation.reason == "social_query_limit_exhausted":
+                            continue
+                        budget_limited = True
+                        break
                 response = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     headers={"Accept": "application/json", "X-Subscription-Token": self.settings.brave_search_api_key},
@@ -541,7 +567,12 @@ class AuthorizedSourceExecutor:
                 )
                 if response.status_code != 200:
                     raise RuntimeError(f"Brave Search failed with status {response.status_code}")
-                results.extend(enumerate(response.json().get("web", {}).get("results", []), start=1))
+                web_results = response.json().get("web", {}).get("results", [])
+                queries_executed += 1
+                social_queries_executed += int(query_kind == "social")
+                results.extend(enumerate(web_results, start=1))
+                if reservation:
+                    await self.brave_budget.complete(reservation, len(web_results))
 
         by_domain: dict[str, ProspectCandidate] = {}
         for rank, result in results:
@@ -606,7 +637,7 @@ class AuthorizedSourceExecutor:
             by_domain[domain] = merge_exact_candidate(existing, candidate) if existing else candidate
         candidates = list(by_domain.values())
         candidates.sort(key=lambda item: (-int(item.market_signals.get("query_hits", 0)), int(item.market_signals.get("best_rank", 99))))
-        return SourceSearchResult(tuple(candidates), {"queries_executed": len(queries), "raw_results": len(results), "unique_results": len(candidates), "market_radar": radar})
+        return SourceSearchResult(tuple(candidates), {"queries_executed": queries_executed, "social_queries_executed": social_queries_executed, "raw_results": len(results), "unique_results": len(candidates), "market_radar": radar, "budget_limited": budget_limited, "budget_reason": "monthly_budget_exhausted" if budget_limited else None, "monthly_spend_usd": round(monthly_spend, 4)})
 
     async def _enrich_official_website(
         self, candidate: ProspectCandidate, task: WorkerTask,
