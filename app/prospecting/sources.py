@@ -65,11 +65,11 @@ class SourceExecutor(Protocol):
 
 
 _TARGET_QUERY_PREFIXES = {
-    "distribuidor": ("distribuidor", "mayorista", "importador"),
-    "tienda comercial": ("tienda", "venta"),
+    "distribuidor": ("distribuidor", "mayorista", "importador", "proveedor"),
+    "tienda comercial": ("tienda", "repuestos", "venta", "insumos"),
     "tecnico": ("servicio tecnico", "mantencion y reparacion"),
     "instalador grande": ("empresa instaladora", "proyectos comerciales"),
-    "competencia": ("empresa",),
+    "competencia": ("empresa", "proyectos HVAC", "refrigeracion industrial"),
     "otro": ("empresa",),
 }
 
@@ -163,9 +163,17 @@ def build_google_query_plan(
 
     location = f"{task.comuna_name}, {task.region_name}, Chile"
     queries = [f"{task.keyword} en {location}"]
-    for target_type in snapshot.campaign.target_types:
-        for prefix in _TARGET_QUERY_PREFIXES.get(target_type, ()):
-            queries.append(f"{prefix} de {task.keyword} en {location}")
+    # Interleave the commercial roles.  This prevents the first selected
+    # target type from consuming the whole request budget and gives one
+    # relevant query to distributors, stores and competitors alike.
+    role_prefixes = [
+        _TARGET_QUERY_PREFIXES.get(target_type, ())
+        for target_type in snapshot.campaign.target_types
+    ]
+    for prefix_index in range(max((len(prefixes) for prefixes in role_prefixes), default=0)):
+        for prefixes in role_prefixes:
+            if prefix_index < len(prefixes):
+                queries.append(f"{prefixes[prefix_index]} de {task.keyword} en {location}")
     queries.extend(
         (
             f"empresa de {task.keyword} en {location}",

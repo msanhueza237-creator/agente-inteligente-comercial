@@ -297,6 +297,50 @@ def test_google_query_plan_expands_target_intents_without_duplicates() -> None:
     assert any("servicio tecnico de aire acondicionado" in query for query in queries)
 
 
+def test_market_coverage_query_plan_interleaves_commercial_roles() -> None:
+    task = WorkerTask(
+        id="task-market",
+        run_id="run-market",
+        source=SourceName.google_places,
+        keyword="refrigeracion comercial",
+        region_code="13",
+        region_name="Metropolitana de Santiago",
+        comuna_code="13101",
+        comuna_name="Santiago",
+        max_results=20,
+        attempt_count=1,
+        max_attempts=3,
+    )
+    snapshot = ProspectingRunSnapshot(
+        crm_run_id="run-market",
+        campaign_version=1,
+        requested_by="admin",
+        campaign=ProspectingCampaign(
+            crm_campaign_id="campaign-market",
+            name="Cobertura de mercado",
+            territories=(
+                Territory(
+                    region_code="13",
+                    region_name="Metropolitana de Santiago",
+                    comuna_code="13101",
+                    comuna_name="Santiago",
+                ),
+            ),
+            keywords=("refrigeracion comercial",),
+            sources=(SourceName.google_places,),
+            target_types=("distribuidor", "tienda comercial", "competencia"),
+        ),
+    )
+
+    queries = build_google_query_plan(task, snapshot, max_queries=6)
+
+    assert any("distribuidor de refrigeracion comercial" in query for query in queries)
+    assert any("tienda de refrigeracion comercial" in query for query in queries)
+    assert any("empresa de refrigeracion comercial" in query for query in queries)
+    assert any("mayorista de refrigeracion comercial" in query for query in queries)
+    assert any("repuestos de refrigeracion comercial" in query for query in queries)
+
+
 @pytest.mark.asyncio
 async def test_email_only_official_enrichment_is_visible_but_not_importable(monkeypatch) -> None:
     task = WorkerTask(

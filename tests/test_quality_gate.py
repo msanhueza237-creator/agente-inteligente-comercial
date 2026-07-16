@@ -10,7 +10,7 @@ from app.prospecting.contracts import (
     SourceName,
     Territory,
 )
-from app.prospecting.scoring import classify_and_score
+from app.prospecting.scoring import classify_and_score, infer_target_type
 from app.prospecting.validation import (
     normalize_geo,
     sanitize_unsubstantiated_external_fields,
@@ -129,6 +129,22 @@ def test_quality_gate_enforces_target_types(snapshot) -> None:
     )
     result = validate_candidate(candidate(category="distribuidor"), restricted)
     assert "outside_target_types" in result.reasons
+
+
+def test_market_signals_classify_and_prioritize_replacement_distributor(snapshot) -> None:
+    prospect = candidate(
+        name="Acondipart Repuestos e Insumos HVAC",
+        description="Mayorista e importador de repuestos para refrigeración y aire acondicionado",
+        specialties=("aire acondicionado", "refrigeracion"),
+        brands=("Daikin", "Copeland"),
+        category=None,
+    )
+
+    prepared = classify_and_score(prospect, snapshot)
+
+    assert infer_target_type(prospect) == "distribuidor"
+    assert prepared.category == "distribuidor"
+    assert prepared.score is not None and prepared.score >= 75
 
 
 def test_google_generic_type_is_rejected_without_hvac_evidence(snapshot) -> None:
