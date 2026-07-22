@@ -202,7 +202,8 @@ def test_google_only_candidate_is_removed_after_retention_window() -> None:
     )
     prepared = scope_candidate_locations(google_only, snapshot())
 
-    assert not prepared.import_eligible
+    assert prepared.import_eligible
+    assert "contact_only_import" in prepared.review_flags
     assert rehydrate_candidate_from_evidence(
         prepared, retained_after_31_days(prepared)
     ) is None

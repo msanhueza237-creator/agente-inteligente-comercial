@@ -356,9 +356,19 @@ def index_candidate_location_evidence(candidate: ProspectCandidate) -> ProspectC
 
 
 def assess_import_eligibility(candidate: ProspectCandidate) -> ProspectCandidate:
-    """Mark which locations remain importable without temporary provider data."""
+    """Mark importable candidates.
+
+    Official/Brave evidence remains the strongest signal. Google Places-only
+    prospects are also importable when they have a usable phone/email and a
+    canonical territory; they are reviewed as contact-only prospects in the CRM.
+    """
 
     permanent = [item for item in candidate.evidence if item.retention_until is None]
+    current_contact_sources = [
+        item
+        for item in candidate.evidence
+        if item.retention_until is None or item.provider == SourceName.google_places
+    ]
     name_ok = has_compatible_evidence(candidate, "name", candidate.name, evidence_items=permanent)
     contact_ok = any(
         value and has_compatible_evidence(candidate, field_name, value, evidence_items=permanent)
@@ -367,6 +377,14 @@ def assess_import_eligibility(candidate: ProspectCandidate) -> ProspectCandidate
             ("email", candidate.email),
             ("website", candidate.website),
         )
+    )
+    contact_only_name_ok = has_compatible_evidence(
+        candidate, "name", candidate.name, evidence_items=current_contact_sources
+    )
+    contact_only_contact_ok = any(
+        value
+        and has_compatible_evidence(candidate, field_name, value, evidence_items=current_contact_sources)
+        for field_name, value in (("phone", candidate.phone), ("email", candidate.email))
     )
     importable: list[int] = []
     for index, location in enumerate(candidate.locations):
@@ -386,14 +404,22 @@ def assess_import_eligibility(candidate: ProspectCandidate) -> ProspectCandidate
         ):
             importable.append(index)
 
-    eligible = bool(name_ok and contact_ok and importable)
+    if not importable and contact_only_name_ok and contact_only_contact_ok:
+        for index, location in enumerate(candidate.locations):
+            if location.region_code and location.comuna_code:
+                importable.append(index)
+                break
+
+    eligible = bool((name_ok and contact_ok and importable) or (contact_only_name_ok and contact_only_contact_ok and importable))
     flags: list[str] = []
     if not eligible:
         flags.append("insufficient_permanent_evidence")
+    elif not (name_ok and contact_ok):
+        flags.append("contact_only_import")
     flags.extend(
         f"location_{index}_temporary_evidence"
         for index in range(len(candidate.locations))
-        if index not in importable
+        if index not in importable and "contact_only_import" not in flags
     )
     return candidate.model_copy(
         update={
