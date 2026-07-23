@@ -21,7 +21,7 @@ from app.enrichment.google_places import (
 from app.enrichment.web_scraper import enrich_from_website
 from app.normalization.address import normalize_address
 from app.normalization.name import normalize_name
-from app.normalization.phone import normalize_phone
+from app.normalization.phone import normalize_phone, normalize_whatsapp_number
 from app.normalization.website import normalize_website
 from app.prospecting.contracts import (
     DerivedProvenance,
@@ -152,6 +152,8 @@ def build_company_summary(candidate: ProspectCandidate) -> str:
         channels.append("correo")
     if candidate.phone:
         channels.append("teléfono")
+    if candidate.whatsapp_number:
+        channels.append("WhatsApp")
     if candidate.social_media:
         channels.append("redes sociales")
     if channels:
@@ -414,6 +416,7 @@ class AuthorizedSourceExecutor:
             phone = normalize_phone(
                 source.get("nationalPhoneNumber") or source.get("internationalPhoneNumber")
             )
+            whatsapp_number = normalize_whatsapp_number(phone)
             website_uri = source.get("websiteUri")
             description = " ".join(source.get("types") or [])
             evidence = [
@@ -475,6 +478,13 @@ class AuthorizedSourceExecutor:
                 ),
                 _evidence(
                     SourceName.google_places,
+                    "whatsapp_number",
+                    whatsapp_number,
+                    source_url=source_url,
+                    provider_record_id=place_id,
+                ),
+                _evidence(
+                    SourceName.google_places,
                     "website",
                     website_uri,
                     source_url=source_url,
@@ -485,6 +495,7 @@ class AuthorizedSourceExecutor:
                 name=name,
                 provider_ids={"google_places": place_id} if place_id else {},
                 phone=phone,
+                whatsapp_number=whatsapp_number,
                 website=website_uri,
                 location=location,
                 description=description,
@@ -736,9 +747,11 @@ class AuthorizedSourceExecutor:
 
         email = enrichment.get("email")
         phone = normalize_phone(enrichment.get("phone"))
+        whatsapp_number = normalize_whatsapp_number(enrichment.get("whatsapp_number") or phone)
         website_description = enrichment.get("description")
         add("email", email, url=field_sources.get("email"))
         add("phone", phone, url=field_sources.get("phone"))
+        add("whatsapp_number", whatsapp_number, url=field_sources.get("whatsapp_number") or field_sources.get("phone"))
         add("description", website_description, url=field_sources.get("description"))
         social_media = enrichment.get("social_media") or {}
         specialties = tuple(enrichment.get("specialties") or ())
@@ -758,6 +771,7 @@ class AuthorizedSourceExecutor:
             update={
                 "email": email or candidate.email,
                 "phone": phone or candidate.phone,
+                "whatsapp_number": whatsapp_number or candidate.whatsapp_number,
                 "description": website_description or candidate.description,
                 "social_media": {**candidate.social_media, **social_media},
                 "specialties": tuple(dict.fromkeys((*candidate.specialties, *specialties))),
@@ -803,6 +817,7 @@ class AuthorizedSourceExecutor:
                 ("website", bool(enriched.website)),
                 ("email", bool(enriched.email)),
                 ("phone", bool(enriched.phone)),
+                ("whatsapp_number", bool(enriched.whatsapp_number)),
                 ("social_media", bool(enriched.social_media)),
             )
             if present

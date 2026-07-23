@@ -164,7 +164,8 @@ async def test_enrichment_reads_structured_identity_and_address_from_contact_pag
 
     assert result["name"] == "Clima Andes SpA"
     assert result["email"] == "ventas@climaandes.cl"
-    assert result["phone"] == "+56 9 8765 4321"
+    assert result["phone"] == "+56987654321"
+    assert result["whatsapp_number"] == "+56987654321"
     assert result["locations"] == [
         {
             "address": "Av. Apoquindo 123",
@@ -230,7 +231,8 @@ async def test_enrichment_prioritizes_contact_about_footer_and_whatsapp() -> Non
     result = await enrich_from_website("https://climasur.cl", client=client)
 
     assert result["email"] == "ventas@climasur.cl"
-    assert result["phone"] == "+56 9 1234 5678"
+    assert result["phone"] == "+56987654321"
+    assert result["whatsapp_number"] == "+56987654321"
     assert result["social_media"]["whatsapp"].startswith("https://api.whatsapp.com/")
     assert "empresa chilena especializada" in result["description"]
     assert result["field_sources"]["email"] == "https://climasur.cl/"

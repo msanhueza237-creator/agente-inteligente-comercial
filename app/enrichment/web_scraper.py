@@ -23,6 +23,7 @@ from bs4 import BeautifulSoup
 from unidecode import unidecode
 
 from app.config import get_settings
+from app.normalization.phone import normalize_phone, normalize_whatsapp_number
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+")
 PHONE_RE = re.compile(
@@ -146,6 +147,7 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
     page_text = " ".join(soup.get_text(" ").split())
     emails = set(EMAIL_RE.findall(page_text))
     phones: set[str] = set(PHONE_RE.findall(page_text))
+    whatsapp_numbers: set[str] = set()
     names: list[str] = []
     descriptions: list[str] = []
     locations: list[dict] = []
@@ -159,6 +161,8 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
             phones.add(href.split(":", 1)[1].split("?", 1)[0])
         elif whatsapp_phone := _whatsapp_phone(href):
             phones.add(whatsapp_phone)
+            if normalized_whatsapp := normalize_whatsapp_number(whatsapp_phone):
+                whatsapp_numbers.add(normalized_whatsapp)
 
     for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
         try:
@@ -253,6 +257,8 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
                 for domain in domains
             ):
                 social[platform] = href
+                if platform == "whatsapp" and (normalized_whatsapp := normalize_whatsapp_number(_whatsapp_phone(href))):
+                    whatsapp_numbers.add(normalized_whatsapp)
         anchor_label = anchor.get_text(" ")
         label = unidecode(f"{anchor_label} {urlsplit(href).path}").casefold().replace("-", " ")
         if target_host == source_host and any(token in label for token in _PAGE_TOKENS):
@@ -268,11 +274,21 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
         (prepared for value in descriptions if (prepared := _clean_public_description(value))),
         None,
     )
+    normalized_phones = sorted(
+        {phone for value in phones if (phone := normalize_phone(value))},
+        key=lambda value: (not value.startswith("+569"), value),
+    )
+    whatsapp_numbers.update(
+        phone for phone in normalized_phones if normalize_whatsapp_number(phone)
+    )
+    primary_phone = normalized_phones[0] if normalized_phones else None
+    primary_whatsapp = sorted(whatsapp_numbers)[0] if whatsapp_numbers else None
     field_sources = {
         field: source_url
         for field, present in (
             ("email", bool(emails)),
-            ("phone", bool(phones)),
+            ("phone", bool(primary_phone)),
+            ("whatsapp_number", bool(primary_whatsapp)),
             ("description", bool(description)),
         )
         if present
@@ -281,7 +297,10 @@ def _page_enrichment(response: SafeResponse) -> tuple[dict, list[str]]:
     result = {
         "name": next((name for name in names if name), None),
         "email": sorted(email for email in emails if email)[0] if emails else None,
-        "phone": sorted(phone for phone in phones if phone)[0] if phones else None,
+        "phone": primary_phone,
+        "whatsapp_number": primary_whatsapp,
+        "phones": normalized_phones or None,
+        "emails": sorted(email for email in emails if email) or None,
         "description": description,
         "website": declared_url or source_url,
         "locations": locations or None,
@@ -475,12 +494,19 @@ async def enrich_from_website(
             except Exception:  # noqa: BLE001 - homepage evidence remains useful
                 continue
             if contact:
-                for field_name in ("name", "email", "phone"):
+                for field_name in ("name", "email", "phone", "whatsapp_number"):
                     if not enrichment.get(field_name) and contact.get(field_name):
                         enrichment[field_name] = contact[field_name]
                         source = (contact.get("field_sources") or {}).get(field_name)
                         if source:
                             enrichment.setdefault("field_sources", {})[field_name] = source
+                for field_name in ("phones", "emails"):
+                    enrichment[field_name] = sorted(
+                        {
+                            *(enrichment.get(field_name) or []),
+                            *(contact.get(field_name) or []),
+                        }
+                    ) or None
                 if contact.get("description") and (
                     not enrichment.get("description") or _is_about_url(contact_response.final_url)
                 ):

@@ -203,6 +203,7 @@ class ProspectCandidate(BaseModel):
     rut: str | None = Field(default=None, max_length=32)
     provider_ids: dict[str, str] = Field(default_factory=dict, max_length=10)
     phone: str | None = Field(default=None, max_length=50)
+    whatsapp_number: str | None = Field(default=None, max_length=50)
     email: str | None = Field(default=None, max_length=320)
     website: str | None = Field(default=None, max_length=2048)
     location: ProspectLocation
