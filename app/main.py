@@ -7,7 +7,14 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.db.base import engine
-from app.web import routes_dedup, routes_import, routes_monitor, routes_prospects, routes_search
+from app.web import (
+    routes_dedup,
+    routes_import,
+    routes_integrations,
+    routes_monitor,
+    routes_prospects,
+    routes_search,
+)
 
 settings = get_settings()
 
@@ -29,6 +36,7 @@ app.include_router(routes_import.router)
 app.include_router(routes_dedup.router)
 app.include_router(routes_search.router)
 app.include_router(routes_monitor.router)
+app.include_router(routes_integrations.router)
 
 
 @app.get("/health")

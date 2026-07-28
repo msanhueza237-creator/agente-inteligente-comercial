@@ -49,5 +49,16 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  hub-worker:
+    build: .
+    image: clima-activa-agent:latest
+    command: ["python", "-m", "app.hub.worker"]
+    env_file:
+      - .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   agent_postgres_data:

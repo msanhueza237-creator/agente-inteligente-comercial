@@ -34,6 +34,26 @@ class Settings(BaseSettings):
     brave_search_monthly_budget_usd: float = 5.0
     brave_search_free_credit_usd: float = 5.0
 
+    # ERP and commerce integrations. Secrets remain in the Agent Hub service.
+    facto_enabled: bool = False
+    facto_api_base_url: str = "https://api-billing.koywe.com/V1"
+    facto_client_id: SecretStr | None = None
+    facto_client_secret: SecretStr | None = None
+    facto_username: SecretStr | None = None
+    facto_password: SecretStr | None = None
+    facto_sync_interval_minutes: int = 30
+    facto_request_timeout_seconds: float = 30.0
+    facto_read_only: bool = True
+
+    tiendanube_enabled: bool = False
+    tiendanube_api_base_url: str = "https://api.tiendanube.com/v1"
+    tiendanube_store_id: str | None = None
+    tiendanube_access_token: SecretStr | None = None
+    tiendanube_user_agent: str = "ClimaActivaCRM/1.0 (msanhueza@latinchile.cl)"
+    tiendanube_sync_interval_minutes: int = 15
+    tiendanube_request_timeout_seconds: float = 30.0
+    tiendanube_read_only: bool = True
+
     # CRM boundary. Production must use the restricted HTTP adapter; the fake
     # port is only allowed for development and tests.
     crm_mode: Literal["fake", "http"] = "fake"
@@ -61,6 +81,12 @@ class Settings(BaseSettings):
     website_max_bytes: int = 1_500_000
     website_timeout_seconds: float = 10.0
 
+    # Multi-agent hub scheduler.
+    hub_worker_id: str = "climactiva-hub-01"
+    hub_poll_seconds: int = 15
+    hub_lease_seconds: int = 120
+    hub_heartbeat_seconds: int = 30
+
     @model_validator(mode="after")
     def production_crm_contract(self) -> "Settings":
         if self.env == "production" and self.crm_mode != "http":
@@ -72,6 +98,41 @@ class Settings(BaseSettings):
                 raise ValueError("CRM_API_KEY is required when CRM_MODE=http")
         if not self.crm_worker_id.strip():
             raise ValueError("CRM_WORKER_ID cannot be empty")
+        if self.facto_enabled:
+            facto_secrets = (
+                self.facto_client_id,
+                self.facto_client_secret,
+                self.facto_username,
+                self.facto_password,
+            )
+            if any(value is None or not value.get_secret_value().strip() for value in facto_secrets):
+                raise ValueError("Facto credentials are required when FACTO_ENABLED=true")
+            if not self.facto_api_base_url.startswith("https://"):
+                raise ValueError("FACTO_API_BASE_URL must use HTTPS")
+        if self.tiendanube_enabled:
+            if not self.tiendanube_store_id or not self.tiendanube_store_id.strip():
+                raise ValueError("TIENDANUBE_STORE_ID is required when TIENDANUBE_ENABLED=true")
+            if (
+                self.tiendanube_access_token is None
+                or not self.tiendanube_access_token.get_secret_value().strip()
+            ):
+                raise ValueError(
+                    "TIENDANUBE_ACCESS_TOKEN is required when TIENDANUBE_ENABLED=true"
+                )
+            if not self.tiendanube_api_base_url.startswith("https://"):
+                raise ValueError("TIENDANUBE_API_BASE_URL must use HTTPS")
+        if min(
+            self.facto_sync_interval_minutes,
+            self.tiendanube_sync_interval_minutes,
+            self.hub_poll_seconds,
+            self.hub_lease_seconds,
+            self.hub_heartbeat_seconds,
+        ) <= 0:
+            raise ValueError("Integration and Agent Hub intervals must be positive")
+        if self.hub_heartbeat_seconds >= self.hub_lease_seconds:
+            raise ValueError("HUB_HEARTBEAT_SECONDS must be lower than HUB_LEASE_SECONDS")
+        if not self.hub_worker_id.strip():
+            raise ValueError("HUB_WORKER_ID cannot be empty")
         if not 1 <= self.google_places_queries_per_task <= 12:
             raise ValueError("GOOGLE_PLACES_QUERIES_PER_TASK must be between 1 and 12")
         if not 1 <= self.google_places_detail_multiplier <= 3:
