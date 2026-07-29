@@ -14,6 +14,10 @@ CRM_API_KEY=REEMPLAZAR
 CRM_WORKER_ID=climactiva-worker-01
 CRM_TIMEOUT_SECONDS=15
 
+# Dokploy despliega este repositorio como un solo servicio web. Este valor
+# hace que ese mismo proceso consuma las tareas solicitadas desde /agentes.
+HUB_EMBEDDED_WORKER=true
+
 # Facto ERP - SOLO LECTURA
 # Mapeo de nombres Facto:
 # - Client Identification  -> FACTO_CLIENT_ID

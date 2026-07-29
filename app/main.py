@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -7,6 +9,8 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.db.base import engine
+from app.hub.crm import HubCRMPort
+from app.hub.worker import run_hub_services
 from app.web import (
     routes_dedup,
     routes_import,
@@ -18,7 +22,32 @@ from app.web import (
 
 settings = get_settings()
 
-app = FastAPI(title="Clima Activa - Agente de Inteligencia Comercial")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    hub_task: asyncio.Task | None = None
+    if settings.hub_embedded_worker and settings.crm_mode == "http":
+        assert settings.crm_base_url is not None
+        assert settings.crm_api_key is not None
+        hub_task = asyncio.create_task(
+            run_hub_services(
+                HubCRMPort(
+                    base_url=settings.crm_base_url,
+                    api_key=settings.crm_api_key.get_secret_value(),
+                    timeout=settings.crm_timeout_seconds,
+                )
+            ),
+            name="climactiva-agent-hub",
+        )
+    try:
+        yield
+    finally:
+        if hub_task:
+            hub_task.cancel()
+            await asyncio.gather(hub_task, return_exceptions=True)
+
+
+app = FastAPI(title="Clima Activa - Agente de Inteligencia Comercial", lifespan=lifespan)
 if settings.env in {"development", "test", "testing"}:
     app.add_middleware(
         CORSMiddleware,

@@ -83,6 +83,9 @@ class Settings(BaseSettings):
 
     # Multi-agent hub scheduler.
     hub_worker_id: str = "climactiva-hub-01"
+    # Dokploy normally starts the Dockerfile web command only. Keep the Hub
+    # consumer embedded so CRM tasks cannot remain pending silently.
+    hub_embedded_worker: bool = True
     hub_poll_seconds: int = 15
     hub_lease_seconds: int = 120
     hub_heartbeat_seconds: int = 30

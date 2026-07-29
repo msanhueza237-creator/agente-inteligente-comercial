@@ -1,8 +1,11 @@
 # Clima Activa Agent Hub v1
 
-El servicio de prospeccion incorpora un segundo worker:
-`python -m app.hub.worker`. El CRM sigue siendo la fuente de verdad y el
-Agent Hub reclama tareas mediante leases de 120 segundos.
+El servicio web inicia el Agent Hub automaticamente cuando
+`HUB_EMBEDDED_WORKER=true` (valor predeterminado). Esto cubre despliegues de
+Dokploy que arrancan solamente el `Dockerfile`. En instalaciones con un
+contenedor dedicado se usa `python -m app.hub.worker` y se configura
+`HUB_EMBEDDED_WORKER=false` en el servicio web. El CRM sigue siendo la fuente
+de verdad y el Agent Hub reclama tareas mediante leases de 120 segundos.
 
 ## Agentes
 
@@ -39,3 +42,6 @@ Solo un administrador del CRM puede aprobarla o rechazarla.
 3. Completar `docs/dokploy-agent-hub-env.example` en el Environment privado.
 4. Mantener Facto y Tiendanube deshabilitados hasta validar cada conexion.
 5. Redeploy de Edge Function, CRM y Agent Hub.
+6. En Dokploy con un unico servicio del agente, mantener
+   `HUB_EMBEDDED_WORKER=true`; las tareas pendientes se reclaman
+   automaticamente despues del redeploy.

@@ -73,6 +73,13 @@ async def main() -> None:
         api_key=settings.crm_api_key.get_secret_value(),
         timeout=settings.crm_timeout_seconds,
     )
+    await run_hub_services(crm)
+
+
+async def run_hub_services(crm: HubCRMPort) -> None:
+    """Run the queue consumer and integration monitor as one supervised unit."""
+
+    settings = get_settings()
     logger.info(
         "agent hub started worker_id=%s agents=%s",
         settings.hub_worker_id,
