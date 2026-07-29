@@ -12,6 +12,7 @@ class AgentType(StrEnum):
     marketing = "marketing"
     finance = "finance"
     collections = "collections"
+    logistics = "logistics"
     foreign_trade = "foreign_trade"
     executive = "executive"
 

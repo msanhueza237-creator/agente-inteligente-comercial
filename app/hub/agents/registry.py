@@ -7,6 +7,7 @@ from app.hub.agents.business import (
     ExecutiveAgent,
     FinanceAgent,
     ForeignTradeAgent,
+    LogisticsAgent,
     MarketingAgent,
 )
 from app.hub.contracts import AgentType
@@ -19,6 +20,7 @@ class AgentRegistry:
             AgentType.marketing: MarketingAgent(),
             AgentType.finance: FinanceAgent(),
             AgentType.collections: CollectionsAgent(),
+            AgentType.logistics: LogisticsAgent(),
             AgentType.foreign_trade: ForeignTradeAgent(),
             AgentType.executive: ExecutiveAgent(),
         }

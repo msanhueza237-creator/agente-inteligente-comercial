@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 from app.foreign_trade.planning import ForeignTradePlanner, InventoryPosition
 from app.hub.agents.base import BusinessAgent
@@ -55,6 +56,121 @@ class CollectionsAgent(BusinessAgent):
             risk_level="high",
         )
         return AgentResult(summary=proposal.summary, metrics={"overdue_amount": float(overdue)}, proposals=[proposal])
+
+
+class LogisticsAgent(BusinessAgent):
+    """Turns Facto inventory snapshots into reviewable cross-agent signals."""
+
+    @staticmethod
+    def _number(row: dict[str, Any], key: str) -> Decimal:
+        return Decimal(str(row.get(key) or 0))
+
+    async def execute(self, task: HubTask) -> AgentResult:
+        products = [item for item in task.payload.get("products", []) if isinstance(item, dict)]
+        if not products:
+            return AgentResult(
+                summary="No hay snapshots logisticos con evidencia de Facto para analizar.",
+                warnings=["Sin productos sincronizados o sin campos de inventario disponibles"],
+            )
+
+        with_sales = [item for item in products if item.get("sales_history_available")]
+        ranked_rotation = sorted(
+            products,
+            key=lambda item: self._number(item, "average_daily_demand"),
+            reverse=True,
+        )
+        ranked_margin = sorted(
+            [item for item in products if item.get("price_known") and item.get("cost_known")],
+            key=lambda item: self._number(item, "margin_percent"),
+            reverse=True,
+        )
+        slow_moving = [
+            item for item in with_sales
+            if item.get("stock_known")
+            and self._number(item, "available_units") > 0
+            and self._number(item, "units_sold_observed") == 0
+        ]
+        high_rotation_low_stock = [
+            item for item in ranked_rotation
+            if item.get("stock_known")
+            and self._number(item, "average_daily_demand") > 0
+            and self._number(item, "available_units")
+            <= self._number(item, "average_daily_demand") * Decimal("30")
+        ]
+
+        def compact(item: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "sku": item.get("sku"),
+                "name": item.get("name"),
+                "stock": item.get("available_units"),
+                "daily_demand": item.get("average_daily_demand"),
+                "margin_percent": item.get("margin_percent"),
+            }
+
+        proposals: list[ActionProposal] = []
+        if slow_moving:
+            proposals.append(
+                ActionProposal(
+                    kind=ProposalKind.campaign_draft,
+                    title="Borrador comercial para inventario de baja rotacion",
+                    summary=(
+                        f"Se detectaron {len(slow_moving)} SKU con stock y sin ventas en el periodo observado. "
+                        "Marketing y Comercial deben revisar antes de crear una campana."
+                    ),
+                    payload={
+                        "source_agent": "logistics",
+                        "next_agents": ["marketing", "commercial"],
+                        "sku_candidates": [compact(item) for item in slow_moving[:20]],
+                    },
+                    risk_level="medium",
+                )
+            )
+        if high_rotation_low_stock:
+            proposals.append(
+                ActionProposal(
+                    kind=ProposalKind.executive_alert,
+                    title="Revision de importacion para SKU de alta rotacion",
+                    summary=(
+                        f"{len(high_rotation_low_stock)} SKU de alta rotacion tienen cobertura menor a 30 dias. "
+                        "Comercio exterior debe calcular la compra con costo y demanda antes de aprobarla."
+                    ),
+                    payload={
+                        "source_agent": "logistics",
+                        "next_agents": ["foreign_trade", "finance", "executive"],
+                        "sku_candidates": [compact(item) for item in high_rotation_low_stock[:20]],
+                    },
+                    risk_level="high",
+                )
+            )
+
+        return AgentResult(
+            summary=(
+                f"Analisis logistico preparado: {len(products)} SKU, {len(with_sales)} con historial de ventas, "
+                f"{len(slow_moving)} de baja rotacion y {len(high_rotation_low_stock)} con cobertura corta."
+            ),
+            metrics={
+                "products": len(products),
+                "with_sales_history": len(with_sales),
+                "slow_moving": len(slow_moving),
+                "high_rotation_low_stock": len(high_rotation_low_stock),
+            },
+            evidence=[
+                {
+                    "logistics_report": {
+                        "top_rotation": [compact(item) for item in ranked_rotation[:10]],
+                        "top_margin": [compact(item) for item in ranked_margin[:10]],
+                        "slow_moving": [compact(item) for item in slow_moving[:20]],
+                        "high_rotation_low_stock": [compact(item) for item in high_rotation_low_stock[:20]],
+                    }
+                }
+            ],
+            proposals=proposals,
+            warnings=(
+                []
+                if with_sales
+                else ["Facto aun no entrego un periodo de ventas suficiente para detectar baja rotacion"]
+            ),
+        )
 
 
 class ForeignTradeAgent(BusinessAgent):

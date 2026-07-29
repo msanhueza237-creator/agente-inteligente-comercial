@@ -118,8 +118,16 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
         available_units = _decimal(stock_value)
         cost_value = _first(product, "cost_usd", "unit_cost_usd", "cost", "purchase_price")
         unit_cost = _decimal(cost_value)
+        price_value = _first(product, "price", "sale_price", "retail_price", "selling_price")
+        unit_price = _decimal(price_value)
         units_sold = sold_units[sku]
         demand = (units_sold / Decimal(period_days)) if period_days else Decimal("0")
+        margin_value = unit_price - unit_cost if cost_value is not None and price_value is not None else None
+        margin_pct = (
+            (margin_value / unit_price * Decimal("100"))
+            if margin_value is not None and unit_price > 0
+            else None
+        )
         snapshots.append(
             {
                 "external_id": sku,
@@ -130,8 +138,13 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                     "stock_known": stock_known,
                     "unit_cost_usd": float(unit_cost),
                     "cost_known": cost_value is not None,
+                    "unit_price": float(unit_price),
+                    "price_known": price_value is not None,
+                    "unit_margin": float(margin_value) if margin_value is not None else None,
+                    "margin_percent": float(margin_pct) if margin_pct is not None else None,
                     "average_daily_demand": float(demand),
                     "demand_available": bool(period_days and units_sold > 0),
+                    "sales_history_available": bool(period_days),
                     "units_sold_observed": float(units_sold),
                     "demand_observation_days": period_days,
                     "source": "facto_read_only",
