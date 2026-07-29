@@ -68,3 +68,19 @@ def test_inventory_snapshot_accepts_nested_spanish_facto_fields() -> None:
     assert snapshot["available_units"] == 6.0
     assert snapshot["unit_cost_usd"] == 85.0
     assert snapshot["average_daily_demand"] == 1.0
+
+
+def test_inventory_snapshot_finds_provider_specific_envelope() -> None:
+    snapshots = extract_product_snapshots(
+        {
+            "respuestaFacto": {
+                "catalogo": [
+                    {"codigo": "P-1", "existencia": 9, "costo": 4, "precio": 8}
+                ]
+            }
+        },
+        {"respuestaFacto": {"ventas": []}},
+    )
+
+    assert snapshots[0]["payload"]["sku"] == "P-1"
+    assert snapshots[0]["payload"]["available_units"] == 9.0

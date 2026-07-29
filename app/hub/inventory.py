@@ -34,9 +34,15 @@ def _decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
 def payload_rows(payload: Any, *keys: str) -> list[dict[str, Any]]:
     """Return business rows from common REST, JSON-LD and nested envelopes."""
 
+    return _payload_rows(payload, keys, depth=0)
+
+
+def _payload_rows(
+    payload: Any, keys: tuple[str, ...], *, depth: int
+) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or depth > 4:
         return []
     candidate_keys = (
         *keys,
@@ -54,14 +60,33 @@ def payload_rows(payload: Any, *keys: str) -> list[dict[str, Any]]:
         value = payload.get(key)
         if isinstance(value, list):
             return [row for row in value if isinstance(row, dict)]
-    # Some APIs wrap the collection twice, for example
-    # {"data": {"products": [...]}} or {"result": {"data": [...]}}.
-    for key in ("data", "result", "response", "payload"):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            rows = payload_rows(value, *keys)
+    # Some APIs wrap the collection two or more times under provider-specific
+    # names. Search nested dictionaries without depending on their labels.
+    for value in payload.values():
+        if isinstance(value, list):
+            rows = [row for row in value if isinstance(row, dict)]
             if rows:
                 return rows
+        if isinstance(value, dict):
+            rows = _payload_rows(value, keys, depth=depth + 1)
+            if rows:
+                return rows
+    # A few endpoints return an object keyed by record ID instead of an array.
+    mapped_rows = [value for value in payload.values() if isinstance(value, dict)]
+    if mapped_rows and len(mapped_rows) == len(payload):
+        row_markers = {
+            "id",
+            "sku",
+            "code",
+            "codigo",
+            "codigoProducto",
+            "name",
+            "nombre",
+            "date",
+            "fecha",
+        }
+        if any(row_markers.intersection(row) for row in mapped_rows):
+            return mapped_rows
     return []
 
 
