@@ -227,6 +227,43 @@ def test_inventory_snapshot_reads_facto_product_and_document_details() -> None:
     assert snapshot["demand_available"] is True
 
 
+def test_inventory_snapshot_reads_facto_price_list_from_product_detail() -> None:
+    snapshots = extract_product_snapshots(
+        [
+            {
+                "product_id": 450,
+                "sku": "RBA-450",
+                "name": "Soporte de techo",
+                "cost": {"currency_id": None, "value": "13236"},
+                "price": [
+                    {
+                        "product_price_list_id": "1",
+                        "unit_net": "25740.000000",
+                        "unit_tax": 4890.6,
+                        "unit_total": "30630.600000",
+                        "currency_id": "39",
+                    }
+                ],
+                "inventories": {
+                    "total_available": 0,
+                    "details": [
+                        {"product_location_id": "1", "available_quantity": 0},
+                        {"product_location_id": "2", "available_quantity": 96},
+                    ],
+                },
+            }
+        ],
+        [],
+    )
+
+    snapshot = snapshots[0]["payload"]
+    assert snapshot["available_units"] == 96.0
+    assert snapshot["unit_price"] == 25740.0
+    assert snapshot["price_known"] is True
+    assert snapshot["price_currency_id"] == "39"
+    assert snapshot["unit_margin"] == 12504.0
+
+
 async def test_load_facto_details_expands_list_rows() -> None:
     class Client:
         async def product(self, product_id):

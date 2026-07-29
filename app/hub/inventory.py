@@ -284,9 +284,18 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
             "precioNeto",
         )
         prices = product.get("prices") or product.get("price")
-        if price_value is None and isinstance(prices, list) and prices:
+        price_currency_id: Any = None
+        price_currency_code: Any = None
+        if isinstance(prices, list) and prices:
             first_price = prices[0]
             if isinstance(first_price, dict):
+                price_currency_id = _first(first_price, "currency_id", "currencyId")
+                price_currency_code = _first(
+                    first_price,
+                    "currency",
+                    "currency_code",
+                    "currencyCode",
+                )
                 price_value = _first(
                     first_price,
                     "unit_net",
@@ -295,6 +304,13 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                     "amount",
                 )
         elif isinstance(price_value, dict):
+            price_currency_id = _first(price_value, "currency_id", "currencyId")
+            price_currency_code = _first(
+                price_value,
+                "currency",
+                "currency_code",
+                "currencyCode",
+            )
             price_value = _first(price_value, "unit_net", "unit_total", "value", "amount")
         unit_price = _decimal(price_value)
         units_sold = sold_units[sku]
@@ -363,6 +379,8 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                     "cost_requires_usd_conversion": cost_value is not None and not cost_is_usd,
                     "unit_price": float(unit_price),
                     "price_known": price_value is not None,
+                    "price_currency_id": price_currency_id,
+                    "price_currency_code": price_currency_code,
                     "unit_margin": float(margin_value) if margin_value is not None else None,
                     "margin_percent": float(margin_pct) if margin_pct is not None else None,
                     "average_daily_demand": float(demand),
