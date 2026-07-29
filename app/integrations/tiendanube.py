@@ -58,32 +58,51 @@ class TiendanubeClient:
             raise TiendanubeError("Tiendanube no esta configurada")
         await self._throttle()
         store_id = self.settings.tiendanube_store_id.strip()
-        url = (
-            f"{self.settings.tiendanube_api_base_url.rstrip('/')}/"
-            f"{store_id}/{resource.strip('/')}"
-        )
+        resource_path = resource.strip("/")
+        token = self.settings.tiendanube_access_token.get_secret_value().strip()
+        urls = [
+            (
+                f"{self.settings.tiendanube_api_base_url.rstrip('/')}/"
+                f"{store_id}/{resource_path}"
+            )
+        ]
+        legacy_url = f"https://api.tiendanube.com/v1/{store_id}/{resource_path}"
+        if legacy_url not in urls:
+            urls.append(legacy_url)
+
         headers = {
-            "Authorization": (
-                f"Bearer {self.settings.tiendanube_access_token.get_secret_value()}"
-            ),
+            # Tiendanube/Nuvemshop has shown both contracts in different
+            # onboarding screens. Keep both read-only auth headers so the same
+            # token works with current and legacy API routes.
+            "Authorization": f"Bearer {token}",
+            "Authentication": f"bearer {token}",
             "User-Agent": self.settings.tiendanube_user_agent,
             "Accept": "application/json",
         }
-        for attempt in range(3):
-            try:
-                async with httpx.AsyncClient(
-                    timeout=self.settings.tiendanube_request_timeout_seconds,
-                    transport=self.transport,
-                    trust_env=False,
-                ) as client:
-                    response = await client.get(url, params=params, headers=headers)
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                raise TiendanubeError(
-                    f"Tiendanube no responde ({type(exc).__name__})"
-                ) from exc
-            if response.status_code != 429:
+        response: httpx.Response | None = None
+        for url_index, url in enumerate(urls):
+            for attempt in range(3):
+                try:
+                    async with httpx.AsyncClient(
+                        timeout=self.settings.tiendanube_request_timeout_seconds,
+                        transport=self.transport,
+                        trust_env=False,
+                    ) as client:
+                        response = await client.get(url, params=params, headers=headers)
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    raise TiendanubeError(
+                        f"Tiendanube no responde ({type(exc).__name__})"
+                    ) from exc
+                if response.status_code != 429:
+                    break
+                await asyncio.sleep(min(2**attempt, 4))
+
+            # If the versioned API rejects the token/route, try Tiendanube's
+            # legacy onboarding example before surfacing the error.
+            if not (url_index == 0 and response.status_code in {401, 404}):
                 break
-            await asyncio.sleep(min(2**attempt, 4))
+
+        assert response is not None
         if response.status_code >= 400:
             raise TiendanubeError(
                 f"Tiendanube devolvio un error ({response.status_code}): "

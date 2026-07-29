@@ -57,7 +57,34 @@ async def test_tiendanube_uses_bearer_header_and_store_path() -> None:
     assert result[0]["id"] == 10
     assert captured[0].url.path.endswith("/2025-03/123/products")
     assert captured[0].headers["Authorization"] == "Bearer token"
+    assert captured[0].headers["Authentication"] == "bearer token"
     assert not hasattr(client, "post")
+
+
+async def test_tiendanube_falls_back_to_legacy_v1_authentication_header() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path.endswith("/2025-03/123/products"):
+            return httpx.Response(401, json={"message": "Unauthorized"})
+        return httpx.Response(200, json=[{"id": 20}])
+
+    client = TiendanubeClient(
+        settings_for_tests(
+            tiendanube_enabled=True,
+            tiendanube_store_id="123",
+            tiendanube_access_token=SecretStr("token"),
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = await client.products(per_page=1)
+
+    assert result[0]["id"] == 20
+    assert len(captured) == 2
+    assert captured[1].url.path.endswith("/v1/123/products")
+    assert captured[1].headers["Authentication"] == "bearer token"
 
 
 async def test_tiendanube_error_includes_provider_detail() -> None:
