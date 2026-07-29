@@ -35,13 +35,51 @@ class MarketingAgent(BusinessAgent):
 
 class FinanceAgent(BusinessAgent):
     async def execute(self, task: HubTask) -> AgentResult:
-        revenue = Decimal(str(task.payload.get("revenue", 0)))
-        cost = Decimal(str(task.payload.get("cost", 0)))
-        margin = revenue - cost
-        margin_pct = (margin / revenue * 100) if revenue else Decimal("0")
+        snapshot = task.payload.get("financial_snapshot")
+        if not isinstance(snapshot, dict) or not snapshot.get("document_count"):
+            return AgentResult(
+                summary="Facto aun no entrega un resumen financiero con documentos emitidos.",
+                warnings=["Espera la siguiente sincronizacion de Facto y vuelve a solicitar el analisis."],
+            )
+        revenue = Decimal(str(snapshot.get("net_sales", 0)))
+        reference_cost = Decimal(str(snapshot.get("reference_cost_of_sales", 0)))
+        reference_margin = revenue - reference_cost
+        margin_pct = (
+            reference_margin / revenue * 100
+            if revenue and snapshot.get("reference_margin_available")
+            else Decimal("0")
+        )
+        warnings = []
+        if not snapshot.get("receivables_available"):
+            warnings.append(
+                "Cuentas por cobrar y vencimientos aun no estan disponibles en la conexion Facto."
+            )
+        if not snapshot.get("expenses_available"):
+            warnings.append(
+                "Gastos, bancos y flujo de caja no se incluyen hasta conectar sus fuentes contables."
+            )
         return AgentResult(
-            summary=f"Margen estimado: USD {margin:.2f} ({margin_pct:.1f}%).",
-            metrics={"revenue": float(revenue), "cost": float(cost), "margin": float(margin)},
+            summary=(
+                f"Facto registra ventas netas por CLP {revenue:.0f} en "
+                f"{int(snapshot.get('document_count', 0))} documentos. "
+                + (
+                    f"El margen bruto referencial es CLP {reference_margin:.0f} ({margin_pct:.1f}%)."
+                    if snapshot.get("reference_margin_available")
+                    else "El margen queda pendiente hasta completar costos relacionados con las ventas."
+                )
+            ),
+            metrics={
+                "net_sales": float(revenue),
+                "tax": float(snapshot.get("tax", 0)),
+                "gross_sales": float(snapshot.get("gross_sales", 0)),
+                "documents": int(snapshot.get("document_count", 0)),
+                "average_net_ticket": float(snapshot.get("average_net_ticket", 0)),
+                "reference_cost": float(reference_cost),
+                "reference_margin": float(reference_margin),
+                "reference_margin_percent": float(margin_pct),
+            },
+            evidence=[{"financial_report": snapshot}],
+            warnings=warnings,
         )
 
 

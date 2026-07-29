@@ -43,6 +43,34 @@ async def test_marketing_agent_only_creates_approval_proposal() -> None:
     assert result.proposals[0].requires_approval is True
 
 
+async def test_finance_agent_uses_facto_snapshot_and_marks_missing_sources() -> None:
+    result = await AgentRegistry().get(AgentType.finance).execute(
+        HubTask(
+            id="task-finance",
+            agent_type=AgentType.finance,
+            action="review_margin",
+            payload={
+                "financial_snapshot": {
+                    "document_count": 2,
+                    "net_sales": 150000,
+                    "tax": 28500,
+                    "gross_sales": 178500,
+                    "average_net_ticket": 75000,
+                    "reference_cost_of_sales": 60000,
+                    "reference_margin_available": True,
+                    "receivables_available": False,
+                    "expenses_available": False,
+                }
+            },
+        )
+    )
+
+    assert result.metrics["net_sales"] == 150000
+    assert result.metrics["reference_margin"] == 90000
+    assert len(result.warnings) == 2
+    assert result.evidence[0]["financial_report"]["document_count"] == 2
+
+
 async def test_all_six_agents_are_registered() -> None:
     assert set(AgentRegistry().names()) == {agent.value for agent in AgentType}
 

@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from app.config import get_settings
 from app.hub.agents import AgentRegistry
 from app.hub.crm import HubCRMPort
+from app.hub.finance import extract_financial_snapshot
 from app.hub.inventory import extract_product_snapshots, payload_rows
 from app.integrations.facto import FactoClient
 from app.integrations.tiendanube import TiendanubeClient
@@ -180,6 +181,15 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                             provider="facto",
                             resource="inventory_snapshots",
                             records=snapshots,
+                        )
+                        financial_snapshots = extract_financial_snapshot(
+                            snapshot_documents,
+                            snapshots,
+                        )
+                        await crm.upsert_integration_records(
+                            provider="facto",
+                            resource="financial_snapshots",
+                            records=financial_snapshots,
                         )
             except Exception:  # noqa: BLE001
                 logger.exception("integration status failed provider=%s", provider)
