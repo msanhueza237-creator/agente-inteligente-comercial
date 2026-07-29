@@ -101,6 +101,29 @@ class ForeignTradeAgent(BusinessAgent):
                 "target_units": result.target_units,
             },
             proposals=[proposal] if result.recommended_units else [],
+            evidence=[
+                {
+                    "inventory_recommendation": {
+                        "sku": result.sku,
+                        "available_units": position.available_units,
+                        "committed_units": position.committed_units,
+                        "confirmed_inbound_units": position.confirmed_inbound_units,
+                        "reorder_point_units": result.reorder_point_units,
+                        "target_units": result.target_units,
+                        "recommended_units": result.recommended_units,
+                        "recommended_value_usd": str(result.recommended_value_usd),
+                        "required_order_date": (
+                            result.required_order_date.isoformat() if result.required_order_date else None
+                        ),
+                        "projected_stockout_date": (
+                            result.projected_stockout_date.isoformat() if result.projected_stockout_date else None
+                        ),
+                        "severity": result.severity,
+                        "purchase_policy": result.purchase_policy,
+                        "warnings": list(result.warnings),
+                    }
+                }
+            ],
             warnings=list(result.warnings),
         )
 

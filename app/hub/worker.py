@@ -8,6 +8,7 @@ import logging
 from app.config import get_settings
 from app.hub.agents import AgentRegistry
 from app.hub.crm import HubCRMPort
+from app.hub.inventory import extract_product_snapshots
 from app.integrations.facto import FactoClient
 from app.integrations.tiendanube import TiendanubeClient
 
@@ -115,6 +116,28 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                         resource="products",
                         records=records,
                     )
+                    # Facto is the ERP source of truth.  Its documents are
+                    # read only and are used only to calculate an auditable
+                    # sales-rate snapshot for the foreign-trade agent.
+                    if provider == "facto":
+                        try:
+                            raw_documents = await client.documents(page=1)
+                            document_records = normalize_product_records(raw_documents)
+                            await crm.upsert_integration_records(
+                                provider="facto",
+                                resource="documents",
+                                records=document_records,
+                            )
+                            snapshots = extract_product_snapshots(raw_products, raw_documents)
+                            await crm.upsert_integration_records(
+                                provider="facto",
+                                resource="inventory_snapshots",
+                                records=snapshots,
+                            )
+                        except Exception:  # noqa: BLE001
+                            # Product synchronization remains healthy when a
+                            # Facto account does not expose sales documents.
+                            logger.warning("Facto documents are not available for inventory analysis", exc_info=True)
             except Exception:  # noqa: BLE001
                 logger.exception("integration status failed provider=%s", provider)
         await asyncio.sleep(min(
