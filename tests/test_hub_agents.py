@@ -69,6 +69,29 @@ async def test_foreign_trade_agent_keeps_inventory_evidence_for_crm_review() -> 
     assert result.proposals[0].requires_approval is True
 
 
+async def test_foreign_trade_agent_reports_missing_inventory_evidence() -> None:
+    result = await AgentRegistry().get(AgentType.foreign_trade).execute(
+        HubTask(
+            id="task-inventory-readiness",
+            agent_type=AgentType.foreign_trade,
+            action="review_inventory_readiness",
+            payload={
+                "catalog_count": 25,
+                "stock_known": 0,
+                "cost_known": 0,
+                "demand_available": 0,
+                "eligible": 0,
+            },
+        )
+    )
+
+    assert result.metrics["catalog_count"] == 25
+    assert result.metrics["eligible"] == 0
+    assert result.proposals == []
+    assert "no inventa datos" in result.summary
+    assert result.warnings
+
+
 async def test_logistics_agent_prepares_cross_agent_proposals() -> None:
     result = await AgentRegistry().get(AgentType.logistics).execute(
         HubTask(

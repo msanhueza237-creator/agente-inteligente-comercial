@@ -178,6 +178,42 @@ class ForeignTradeAgent(BusinessAgent):
         self.planner = ForeignTradePlanner()
 
     async def execute(self, task: HubTask) -> AgentResult:
+        if task.action == "review_inventory_readiness":
+            catalog_count = int(task.payload.get("catalog_count", 0))
+            stock_known = int(task.payload.get("stock_known", 0))
+            cost_known = int(task.payload.get("cost_known", 0))
+            demand_available = int(task.payload.get("demand_available", 0))
+            eligible = int(task.payload.get("eligible", 0))
+            return AgentResult(
+                summary=(
+                    f"Facto sincronizo {catalog_count} productos, pero ninguno tiene aun evidencia "
+                    "completa de stock, costo y ventas por SKU. No se genero una compra ni una alerta "
+                    "de quiebre porque el agente no inventa datos."
+                ),
+                metrics={
+                    "catalog_count": catalog_count,
+                    "stock_known": stock_known,
+                    "cost_known": cost_known,
+                    "demand_available": demand_available,
+                    "eligible": eligible,
+                },
+                evidence=[
+                    {
+                        "inventory_readiness": {
+                            "source": "facto_read_only",
+                            "catalog_count": catalog_count,
+                            "stock_known": stock_known,
+                            "cost_known": cost_known,
+                            "demand_available": demand_available,
+                            "eligible": eligible,
+                        }
+                    }
+                ],
+                warnings=[
+                    "Configura en Facto una fuente o endpoint que exponga existencias, costo y detalle de ventas por SKU."
+                ],
+            )
+
         position = InventoryPosition(
             sku=str(task.payload["sku"]),
             available_units=int(task.payload.get("available_units", 0)),
