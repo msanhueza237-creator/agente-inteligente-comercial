@@ -182,18 +182,30 @@ class ForeignTradeAgent(BusinessAgent):
             catalog_count = int(task.payload.get("catalog_count", 0))
             stock_known = int(task.payload.get("stock_known", 0))
             cost_known = int(task.payload.get("cost_known", 0))
+            cost_available_in_source = int(task.payload.get("cost_available_in_source", 0))
+            cost_requires_usd_conversion = int(task.payload.get("cost_requires_usd_conversion", 0))
             demand_available = int(task.payload.get("demand_available", 0))
             eligible = int(task.payload.get("eligible", 0))
+            missing = []
+            if demand_available == 0:
+                missing.append("ventas por SKU")
+            if cost_known == 0 and cost_available_in_source:
+                missing.append("conversion verificable del costo a USD")
+            elif cost_known == 0:
+                missing.append("costo")
+            missing_text = " y ".join(missing) or "evidencia suficiente"
             return AgentResult(
                 summary=(
-                    f"Facto sincronizo {catalog_count} productos, pero ninguno tiene aun evidencia "
-                    "completa de stock, costo y ventas por SKU. No se genero una compra ni una alerta "
-                    "de quiebre porque el agente no inventa datos."
+                    f"Facto sincronizo {catalog_count} productos: {stock_known} con stock y "
+                    f"{cost_available_in_source} con costo de origen. Aun falta {missing_text}; "
+                    "por eso no se genero una compra ni una alerta de quiebre. El agente no inventa datos."
                 ),
                 metrics={
                     "catalog_count": catalog_count,
                     "stock_known": stock_known,
                     "cost_known": cost_known,
+                    "cost_available_in_source": cost_available_in_source,
+                    "cost_requires_usd_conversion": cost_requires_usd_conversion,
                     "demand_available": demand_available,
                     "eligible": eligible,
                 },
@@ -204,13 +216,24 @@ class ForeignTradeAgent(BusinessAgent):
                             "catalog_count": catalog_count,
                             "stock_known": stock_known,
                             "cost_known": cost_known,
+                            "cost_available_in_source": cost_available_in_source,
+                            "cost_requires_usd_conversion": cost_requires_usd_conversion,
                             "demand_available": demand_available,
                             "eligible": eligible,
                         }
                     }
                 ],
                 warnings=[
-                    "Configura en Facto una fuente o endpoint que exponga existencias, costo y detalle de ventas por SKU."
+                    (
+                        "Facto no entrego lineas de venta por SKU en los documentos consultados."
+                        if demand_available == 0
+                        else "Revisa la evidencia de demanda antes de proponer una compra."
+                    ),
+                    *(
+                        ["El costo de Facto esta en moneda de origen y requiere una conversion auditable a USD."]
+                        if cost_requires_usd_conversion
+                        else []
+                    ),
                 ],
             )
 

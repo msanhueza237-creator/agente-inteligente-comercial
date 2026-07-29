@@ -77,8 +77,10 @@ async def test_foreign_trade_agent_reports_missing_inventory_evidence() -> None:
             action="review_inventory_readiness",
             payload={
                 "catalog_count": 25,
-                "stock_known": 0,
+                "stock_known": 25,
                 "cost_known": 0,
+                "cost_available_in_source": 25,
+                "cost_requires_usd_conversion": 25,
                 "demand_available": 0,
                 "eligible": 0,
             },
@@ -89,6 +91,8 @@ async def test_foreign_trade_agent_reports_missing_inventory_evidence() -> None:
     assert result.metrics["eligible"] == 0
     assert result.proposals == []
     assert "no inventa datos" in result.summary
+    assert "25 con stock" in result.summary
+    assert result.metrics["cost_available_in_source"] == 25
     assert result.warnings
 
 
