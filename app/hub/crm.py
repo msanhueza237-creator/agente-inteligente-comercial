@@ -69,9 +69,23 @@ class HubCRMPort:
         task = data.get("task")
         if not isinstance(task, dict):
             return None
+        # Supabase returns the complete persistent row, including scheduler
+        # metadata. Keep the domain contract narrow and ignore those storage
+        # fields explicitly.
+        task_contract = {
+            field: task.get(field)
+            for field in (
+                "id",
+                "agent_type",
+                "action",
+                "payload",
+                "requested_by",
+                "created_at",
+            )
+        }
         return ClaimedHubTask.model_validate(
             {
-                **task,
+                **task_contract,
                 "lease_token": data["lease_token"],
                 "lease_expires_at": data["lease_expires_at"],
             }

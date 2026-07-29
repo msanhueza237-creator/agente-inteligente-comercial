@@ -1,5 +1,33 @@
 from app.hub.agents import AgentRegistry
-from app.hub.contracts import AgentType, HubTask
+from app.hub.contracts import AgentType, ClaimedHubTask, HubTask
+
+
+def test_claim_contract_accepts_only_domain_fields() -> None:
+    database_row = {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "agent_type": "foreign_trade",
+        "action": "analyze_inventory",
+        "payload": {},
+        "requested_by": None,
+        "created_at": "2026-07-29T12:00:00+00:00",
+        "status": "in_progress",
+        "attempts": 1,
+        "priority": 50,
+        "worker_id": "climactiva-hub-01",
+        "result": None,
+    }
+    domain_row = {
+        field: database_row.get(field)
+        for field in ("id", "agent_type", "action", "payload", "requested_by", "created_at")
+    }
+    claimed = ClaimedHubTask.model_validate(
+        {
+            **domain_row,
+            "lease_token": "00000000-0000-0000-0000-000000000002",
+            "lease_expires_at": "2026-07-29T12:02:00+00:00",
+        }
+    )
+    assert claimed.agent_type is AgentType.foreign_trade
 
 
 async def test_marketing_agent_only_creates_approval_proposal() -> None:
