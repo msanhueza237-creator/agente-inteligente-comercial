@@ -119,13 +119,12 @@ def _inventory_stock(product: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]
         if isinstance(details_value, list)
         else []
     )
-    total_available = _first(
-        inventories,
-        "total_available",
-        "available_quantity",
-        "total_disponible",
-    )
-    if total_available is None and details:
+    # Facto's production API can return ``total_available = 0`` even when the
+    # per-location details contain the real positive stock.  The Bodega screen
+    # is built from those details, so they are the authoritative source when
+    # present.  Use the summary only for installations that omit details.
+    total_available = None
+    if details:
         quantities = [
             _first(row, "available_quantity", "cantidad_disponible", "available")
             for row in details
@@ -136,6 +135,13 @@ def _inventory_stock(product: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]
                 (_decimal(value) for value in known_quantities),
                 Decimal("0"),
             )
+    if total_available is None:
+        total_available = _first(
+            inventories,
+            "total_available",
+            "available_quantity",
+            "total_disponible",
+        )
     return total_available, details
 
 

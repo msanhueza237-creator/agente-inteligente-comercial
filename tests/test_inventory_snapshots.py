@@ -144,6 +144,31 @@ def test_inventory_snapshot_sums_facto_warehouse_details_when_total_is_missing()
     assert snapshots[0]["payload"]["stock_known"] is True
 
 
+def test_inventory_snapshot_uses_warehouse_details_when_facto_total_is_stale() -> None:
+    snapshots = extract_product_snapshots(
+        {
+            "data": [
+                {
+                    "product_id": 236,
+                    "sku": "RBA-450",
+                    "inventories": {
+                        "total_available": 0,
+                        "details": [
+                            {"product_location_id": 2, "available_quantity": "0.000000"},
+                            {"product_location_id": 1, "available_quantity": "96.000000"},
+                        ],
+                    },
+                }
+            ]
+        },
+        {},
+    )
+
+    payload = snapshots[0]["payload"]
+    assert payload["stock_known"] is True
+    assert payload["available_units"] == 96
+
+
 def test_inventory_snapshot_finds_provider_specific_envelope() -> None:
     snapshots = extract_product_snapshots(
         {
