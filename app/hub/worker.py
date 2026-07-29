@@ -117,6 +117,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                 )
                 if health.connected:
                     raw_products = await client.products(page=1)
+                    snapshot_products = raw_products
                     records = normalize_product_records(raw_products)
                     await crm.upsert_integration_records(
                         provider=provider,
@@ -128,12 +129,30 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                     # sales-rate snapshot for the foreign-trade agent.
                     if provider == "facto":
                         raw_documents = {}
+                        snapshot_documents = raw_documents
                         try:
                             raw_documents = await client.documents(page=1)
-                            document_records = normalize_product_records(raw_documents)
+                            snapshot_documents = raw_documents
                             await crm.upsert_integration_records(
                                 provider="facto",
                                 resource="documents",
+                                records=normalize_product_records(raw_documents),
+                            )
+                            snapshot_products, snapshot_documents = await load_facto_details(
+                                client,
+                                raw_products,
+                                raw_documents,
+                            )
+                            detail_product_records = normalize_product_records(snapshot_products)
+                            await crm.upsert_integration_records(
+                                provider="facto",
+                                resource="product_details",
+                                records=detail_product_records,
+                            )
+                            document_records = normalize_product_records(snapshot_documents)
+                            await crm.upsert_integration_records(
+                                provider="facto",
+                                resource="document_details",
                                 records=document_records,
                             )
                         except Exception:  # noqa: BLE001
@@ -144,7 +163,10 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                         # unavailable it is marked as insufficient for a
                         # purchase recommendation, instead of disappearing
                         # from the CRM completely.
-                        snapshots = extract_product_snapshots(raw_products, raw_documents)
+                        snapshots = extract_product_snapshots(
+                            snapshot_products,
+                            snapshot_documents,
+                        )
                         await crm.upsert_integration_records(
                             provider="facto",
                             resource="inventory_snapshots",
@@ -158,13 +180,61 @@ async def integration_monitor(crm: HubCRMPort) -> None:
         ) * 60)
 
 
+async def load_facto_details(
+    client: FactoClient,
+    products_payload,
+    documents_payload,
+    *,
+    concurrency: int = 5,
+) -> tuple[list[dict], list[dict]]:
+    """Read full Facto records required for stock and auditable sales demand."""
+
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def product_detail(row: dict) -> dict:
+        product_id = row.get("product_id") or row.get("id")
+        if product_id is None:
+            return row
+        async with semaphore:
+            try:
+                detail = await client.product(product_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("Facto product detail unavailable id=%s", product_id)
+                return row
+        return detail if isinstance(detail, dict) else row
+
+    async def document_detail(row: dict) -> dict:
+        document_id = row.get("document_id") or row.get("id")
+        if document_id is None:
+            return row
+        async with semaphore:
+            try:
+                detail = await client.document(document_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("Facto document detail unavailable id=%s", document_id)
+                return row
+        return detail if isinstance(detail, dict) else row
+
+    product_rows = payload_rows(products_payload, "data", "products", "items")
+    document_rows = payload_rows(documents_payload, "data", "documents", "items")
+    products = await asyncio.gather(*(product_detail(row) for row in product_rows[:100]))
+    documents = await asyncio.gather(*(document_detail(row) for row in document_rows[:100]))
+    return list(products), list(documents)
+
+
 def normalize_product_records(payload) -> list[dict]:
     rows = payload_rows(payload, "data", "products", "documents", "items")
     result: list[dict] = []
     for index, row in enumerate(rows[:100]):
         if not isinstance(row, dict):
             continue
-        external_id = row.get("id") or row.get("sku") or row.get("code")
+        external_id = (
+            row.get("id")
+            or row.get("product_id")
+            or row.get("document_id")
+            or row.get("sku")
+            or row.get("code")
+        )
         if external_id is None:
             external_id = hashlib.sha256(
                 json.dumps(row, sort_keys=True, default=str).encode()

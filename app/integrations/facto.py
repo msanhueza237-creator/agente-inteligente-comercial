@@ -111,11 +111,17 @@ class FactoClient:
     async def products(self, *, page: int = 1) -> Any:
         return await self.get("products", params={"page": max(1, page)})
 
+    async def product(self, product_id: str | int) -> Any:
+        return await self.get(f"products/{product_id}")
+
     async def customers(self, *, page: int = 1) -> Any:
         return await self.get("clients", params={"page": max(1, page)})
 
     async def documents(self, *, page: int = 1) -> Any:
         return await self.get("documents", params={"page": max(1, page)})
+
+    async def document(self, document_id: str | int) -> Any:
+        return await self.get(f"documents/{document_id}")
 
     async def health(self) -> FactoHealth:
         if not self.configured:

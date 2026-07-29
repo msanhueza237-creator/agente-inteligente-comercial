@@ -38,6 +38,33 @@ async def test_facto_authenticates_and_reads_products_without_write_methods() ->
     assert not hasattr(client, "post")
 
 
+async def test_facto_reads_product_and_document_details() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/auth"):
+            return httpx.Response(200, json={"access_token": "temporary-token"})
+        return httpx.Response(200, json={"id": request.url.path.rsplit("/", 1)[-1]})
+
+    client = FactoClient(
+        settings_for_tests(
+            facto_enabled=True,
+            facto_client_id=SecretStr("id"),
+            facto_client_secret=SecretStr("secret"),
+            facto_username=SecretStr("user"),
+            facto_password=SecretStr("password"),
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    await client.product(40)
+    await client.document(100)
+
+    assert paths[-2].endswith("/products/40")
+    assert paths[-1].endswith("/documents/100")
+
+
 async def test_tiendanube_uses_bearer_header_and_store_path() -> None:
     captured: list[httpx.Request] = []
 

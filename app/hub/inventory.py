@@ -107,6 +107,11 @@ def _line_rows(document: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _document_date(document: dict[str, Any]) -> date | None:
+    header = document.get("header")
+    if isinstance(header, dict):
+        nested_date = _document_date(header)
+        if nested_date is not None:
+            return nested_date
     value = _first(
         document,
         "issued_at",
@@ -199,6 +204,14 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
             "cantidad",
             "existencia",
         )
+        inventories = product.get("inventories")
+        if stock_value is None and isinstance(inventories, dict):
+            stock_value = _first(
+                inventories,
+                "total_available",
+                "available_quantity",
+                "total_disponible",
+            )
         stock_known = stock_value is not None
         available_units = _decimal(stock_value)
         cost_value = _first(
@@ -213,7 +226,20 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
             "precio_compra",
             "precioCompra",
         )
+        cost_currency_id: Any = None
+        cost_currency_code: Any = None
+        explicit_usd_cost = _first(product, "cost_usd", "unit_cost_usd") is not None
+        if isinstance(cost_value, dict):
+            cost_currency_id = _first(cost_value, "currency_id", "currencyId")
+            cost_currency_code = _first(
+                cost_value,
+                "currency",
+                "currency_code",
+                "currencyCode",
+            )
+            cost_value = _first(cost_value, "value", "amount", "unit_cost", "valor")
         unit_cost = _decimal(cost_value)
+        cost_is_usd = explicit_usd_cost or str(cost_currency_code or "").upper() == "USD"
         price_value = _first(
             product,
             "price",
@@ -224,6 +250,19 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
             "precio_neto",
             "precioNeto",
         )
+        prices = product.get("prices") or product.get("price")
+        if price_value is None and isinstance(prices, list) and prices:
+            first_price = prices[0]
+            if isinstance(first_price, dict):
+                price_value = _first(
+                    first_price,
+                    "unit_net",
+                    "unit_total",
+                    "value",
+                    "amount",
+                )
+        elif isinstance(price_value, dict):
+            price_value = _first(price_value, "unit_net", "unit_total", "value", "amount")
         unit_price = _decimal(price_value)
         units_sold = sold_units[sku]
         demand = (units_sold / Decimal(period_days)) if period_days else Decimal("0")
@@ -251,8 +290,13 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                     ),
                     "available_units": float(available_units),
                     "stock_known": stock_known,
-                    "unit_cost_usd": float(unit_cost),
-                    "cost_known": cost_value is not None,
+                    "unit_cost_usd": float(unit_cost) if cost_is_usd else 0.0,
+                    "unit_cost_source": float(unit_cost),
+                    "cost_currency_id": cost_currency_id,
+                    "cost_currency_code": cost_currency_code,
+                    "cost_known": cost_value is not None and cost_is_usd,
+                    "cost_available_in_source": cost_value is not None,
+                    "cost_requires_usd_conversion": cost_value is not None and not cost_is_usd,
                     "unit_price": float(unit_price),
                     "price_known": price_value is not None,
                     "unit_margin": float(margin_value) if margin_value is not None else None,
