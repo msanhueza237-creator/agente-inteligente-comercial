@@ -8,7 +8,7 @@ import logging
 from app.config import get_settings
 from app.hub.agents import AgentRegistry
 from app.hub.crm import HubCRMPort
-from app.hub.inventory import extract_product_snapshots
+from app.hub.inventory import extract_product_snapshots, payload_rows
 from app.integrations.facto import FactoClient
 from app.integrations.tiendanube import TiendanubeClient
 
@@ -159,19 +159,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
 
 
 def normalize_product_records(payload) -> list[dict]:
-    if isinstance(payload, list):
-        rows = payload
-    elif isinstance(payload, dict):
-        rows = next(
-            (
-                value
-                for key in ("data", "products", "items")
-                if isinstance((value := payload.get(key)), list)
-            ),
-            [],
-        )
-    else:
-        rows = []
+    rows = payload_rows(payload, "data", "products", "documents", "items")
     result: list[dict] = []
     for index, row in enumerate(rows[:100]):
         if not isinstance(row, dict):

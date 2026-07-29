@@ -31,24 +31,50 @@ def _decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
         return default
 
 
-def _rows(payload: Any, *keys: str) -> list[dict[str, Any]]:
+def payload_rows(payload: Any, *keys: str) -> list[dict[str, Any]]:
+    """Return business rows from common REST, JSON-LD and nested envelopes."""
+
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
     if not isinstance(payload, dict):
         return []
-    for key in keys:
+    candidate_keys = (
+        *keys,
+        "data",
+        "results",
+        "records",
+        "items",
+        "products",
+        "documents",
+        "content",
+        "rows",
+        "hydra:member",
+    )
+    for key in dict.fromkeys(candidate_keys):
         value = payload.get(key)
         if isinstance(value, list):
             return [row for row in value if isinstance(row, dict)]
+    # Some APIs wrap the collection twice, for example
+    # {"data": {"products": [...]}} or {"result": {"data": [...]}}.
+    for key in ("data", "result", "response", "payload"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            rows = payload_rows(value, *keys)
+            if rows:
+                return rows
     return []
 
 
 def _line_rows(document: dict[str, Any]) -> list[dict[str, Any]]:
-    return _rows(
+    return payload_rows(
         document,
         "items",
         "lines",
         "details",
+        "detail",
+        "detalles",
+        "detalle",
+        "lineas",
         "products",
         "document_items",
         "documentLines",
@@ -56,7 +82,17 @@ def _line_rows(document: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _document_date(document: dict[str, Any]) -> date | None:
-    value = _first(document, "issued_at", "issue_date", "date", "created_at", "emission_date")
+    value = _first(
+        document,
+        "issued_at",
+        "issue_date",
+        "date",
+        "created_at",
+        "emission_date",
+        "fecha_emision",
+        "fechaEmision",
+        "fecha",
+    )
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -78,19 +114,30 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
 
     sold_units: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     document_dates: list[date] = []
-    for document in _rows(documents_payload, "data", "documents", "items"):
+    for document in payload_rows(documents_payload, "data", "documents", "items"):
         document_date = _document_date(document)
         if document_date:
             document_dates.append(document_date)
         for line in _line_rows(document):
-            sku = _first(line, "sku", "product_sku", "code", "product_code")
+            sku = _first(
+                line,
+                "sku",
+                "product_sku",
+                "code",
+                "product_code",
+                "codigo",
+                "codigo_producto",
+                "codigoProducto",
+            )
             if sku is None:
                 product = line.get("product")
                 if isinstance(product, dict):
                     sku = _first(product, "sku", "code", "id")
             if sku is None:
                 continue
-            quantity = _decimal(_first(line, "quantity", "qty", "units", "amount"))
+            quantity = _decimal(
+                _first(line, "quantity", "qty", "units", "amount", "cantidad")
+            )
             if quantity > 0:
                 sold_units[str(sku).strip()] += quantity
 
@@ -100,8 +147,17 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
         period_days = 0
 
     snapshots: list[dict[str, Any]] = []
-    for product in _rows(products_payload, "data", "products", "items"):
-        sku_value = _first(product, "sku", "code", "product_code", "id")
+    for product in payload_rows(products_payload, "data", "products", "items"):
+        sku_value = _first(
+            product,
+            "sku",
+            "code",
+            "product_code",
+            "codigo",
+            "codigo_producto",
+            "codigoProducto",
+            "id",
+        )
         if sku_value is None:
             continue
         sku = str(sku_value).strip()
@@ -113,12 +169,36 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
             "available_quantity",
             "quantity",
             "inventory",
+            "stock_actual",
+            "stockActual",
+            "cantidad",
+            "existencia",
         )
         stock_known = stock_value is not None
         available_units = _decimal(stock_value)
-        cost_value = _first(product, "cost_usd", "unit_cost_usd", "cost", "purchase_price")
+        cost_value = _first(
+            product,
+            "cost_usd",
+            "unit_cost_usd",
+            "cost",
+            "purchase_price",
+            "costo",
+            "costo_neto",
+            "costoNeto",
+            "precio_compra",
+            "precioCompra",
+        )
         unit_cost = _decimal(cost_value)
-        price_value = _first(product, "price", "sale_price", "retail_price", "selling_price")
+        price_value = _first(
+            product,
+            "price",
+            "sale_price",
+            "retail_price",
+            "selling_price",
+            "precio",
+            "precio_neto",
+            "precioNeto",
+        )
         unit_price = _decimal(price_value)
         units_sold = sold_units[sku]
         demand = (units_sold / Decimal(period_days)) if period_days else Decimal("0")
@@ -133,7 +213,17 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                 "external_id": sku,
                 "payload": {
                     "sku": sku,
-                    "name": str(_first(product, "name", "title", "description") or sku),
+                    "name": str(
+                        _first(
+                            product,
+                            "name",
+                            "title",
+                            "description",
+                            "nombre",
+                            "descripcion",
+                        )
+                        or sku
+                    ),
                     "available_units": float(available_units),
                     "stock_known": stock_known,
                     "unit_cost_usd": float(unit_cost),
