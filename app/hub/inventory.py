@@ -106,6 +106,39 @@ def _line_rows(document: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
 
+def _inventory_stock(product: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
+    """Read stock from Facto's documented warehouse inventory structure."""
+
+    inventories = product.get("inventories")
+    if not isinstance(inventories, dict):
+        return None, []
+
+    details_value = inventories.get("details")
+    details = (
+        [row for row in details_value if isinstance(row, dict)]
+        if isinstance(details_value, list)
+        else []
+    )
+    total_available = _first(
+        inventories,
+        "total_available",
+        "available_quantity",
+        "total_disponible",
+    )
+    if total_available is None and details:
+        quantities = [
+            _first(row, "available_quantity", "cantidad_disponible", "available")
+            for row in details
+        ]
+        known_quantities = [value for value in quantities if value is not None]
+        if known_quantities:
+            total_available = sum(
+                (_decimal(value) for value in known_quantities),
+                Decimal("0"),
+            )
+    return total_available, details
+
+
 def _document_date(document: dict[str, Any]) -> date | None:
     header = document.get("header")
     if isinstance(header, dict):
@@ -191,26 +224,20 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
         if sku_value is None:
             continue
         sku = str(sku_value).strip()
-        stock_value = _first(
-            product,
-            "stock",
-            "stock_quantity",
-            "available_stock",
-            "available_quantity",
-            "quantity",
-            "inventory",
-            "stock_actual",
-            "stockActual",
-            "cantidad",
-            "existencia",
-        )
-        inventories = product.get("inventories")
-        if stock_value is None and isinstance(inventories, dict):
+        # Facto keeps the real availability in ``inventories``. Generic
+        # ``quantity`` fields belong to invoicing and must not be interpreted
+        # as warehouse stock.
+        stock_value, warehouse_details = _inventory_stock(product)
+        if stock_value is None:
             stock_value = _first(
-                inventories,
-                "total_available",
+                product,
+                "stock",
+                "stock_quantity",
+                "available_stock",
                 "available_quantity",
-                "total_disponible",
+                "stock_actual",
+                "stockActual",
+                "existencia",
             )
         stock_known = stock_value is not None
         available_units = _decimal(stock_value)
@@ -290,6 +317,37 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                     ),
                     "available_units": float(available_units),
                     "stock_known": stock_known,
+                    "warehouse_stock": [
+                        {
+                            "product_location_id": _first(
+                                row,
+                                "product_location_id",
+                                "location_id",
+                                "bodega_id",
+                            ),
+                            "available_quantity": float(
+                                _decimal(
+                                    _first(
+                                        row,
+                                        "available_quantity",
+                                        "cantidad_disponible",
+                                        "available",
+                                    )
+                                )
+                            ),
+                            "reserved_quantity": float(
+                                _decimal(
+                                    _first(
+                                        row,
+                                        "reserved_quantity",
+                                        "cantidad_reservada",
+                                        "reserved",
+                                    )
+                                )
+                            ),
+                        }
+                        for row in warehouse_details
+                    ],
                     "unit_cost_usd": float(unit_cost) if cost_is_usd else 0.0,
                     "unit_cost_source": float(unit_cost),
                     "cost_currency_id": cost_currency_id,

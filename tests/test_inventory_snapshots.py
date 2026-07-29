@@ -72,6 +72,78 @@ def test_inventory_snapshot_accepts_nested_spanish_facto_fields() -> None:
     assert snapshot["average_daily_demand"] == 1.0
 
 
+def test_inventory_snapshot_prefers_facto_warehouse_stock_over_generic_quantity() -> None:
+    snapshots = extract_product_snapshots(
+        {
+            "data": [
+                {
+                    "product_id": 10,
+                    "sku": "BOD-10",
+                    "name": "Producto en bodega",
+                    "quantity": 0,
+                    "inventories": {
+                        "total_available": 17,
+                        "total_reserved": 2,
+                        "details": [
+                            {
+                                "product_location_id": 4,
+                                "available_quantity": 17,
+                                "reserved_quantity": 2,
+                            }
+                        ],
+                    },
+                }
+            ]
+        },
+        {},
+    )
+
+    payload = snapshots[0]["payload"]
+    assert payload["stock_known"] is True
+    assert payload["available_units"] == 17
+    assert payload["warehouse_stock"] == [
+        {
+            "product_location_id": 4,
+            "available_quantity": 17,
+            "reserved_quantity": 2,
+        }
+    ]
+
+
+def test_inventory_snapshot_does_not_treat_invoice_quantity_as_stock() -> None:
+    snapshots = extract_product_snapshots(
+        {"data": [{"product_id": 11, "sku": "SIN-BODEGA", "quantity": 0}]},
+        {},
+    )
+
+    payload = snapshots[0]["payload"]
+    assert payload["stock_known"] is False
+    assert payload["available_units"] == 0
+
+
+def test_inventory_snapshot_sums_facto_warehouse_details_when_total_is_missing() -> None:
+    snapshots = extract_product_snapshots(
+        {
+            "data": [
+                {
+                    "product_id": 12,
+                    "sku": "MULTI-BODEGA",
+                    "inventories": {
+                        "details": [
+                            {"product_location_id": 1, "available_quantity": 3},
+                            {"product_location_id": 2, "available_quantity": 5},
+                        ]
+                    },
+                }
+            ]
+        },
+        {},
+    )
+
+    assert snapshots[0]["payload"]["available_units"] == 8
+    assert snapshots[0]["payload"]["stock_known"] is True
+
+
 def test_inventory_snapshot_finds_provider_specific_envelope() -> None:
     snapshots = extract_product_snapshots(
         {
