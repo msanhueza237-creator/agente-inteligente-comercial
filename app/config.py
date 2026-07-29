@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     facto_read_only: bool = True
 
     tiendanube_enabled: bool = False
-    tiendanube_api_base_url: str = "https://api.tiendanube.com/v1"
+    tiendanube_api_base_url: str = "https://api.tiendanube.com/2025-03"
     tiendanube_store_id: str | None = None
     tiendanube_access_token: SecretStr | None = None
     tiendanube_user_agent: str = "ClimaActivaCRM/1.0 (msanhueza@latinchile.cl)"

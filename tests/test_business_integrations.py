@@ -55,6 +55,6 @@ async def test_tiendanube_uses_bearer_header_and_store_path() -> None:
     )
     result = await client.products(per_page=1)
     assert result[0]["id"] == 10
-    assert captured[0].url.path.endswith("/v1/123/products")
-    assert captured[0].headers["Authentication"] == "bearer token"
+    assert captured[0].url.path.endswith("/2025-03/123/products")
+    assert captured[0].headers["Authorization"] == "Bearer token"
     assert not hasattr(client, "post")

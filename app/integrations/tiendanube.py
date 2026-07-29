@@ -63,8 +63,8 @@ class TiendanubeClient:
             f"{store_id}/{resource.strip('/')}"
         )
         headers = {
-            "Authentication": (
-                f"bearer {self.settings.tiendanube_access_token.get_secret_value()}"
+            "Authorization": (
+                f"Bearer {self.settings.tiendanube_access_token.get_secret_value()}"
             ),
             "User-Agent": self.settings.tiendanube_user_agent,
             "Accept": "application/json",
