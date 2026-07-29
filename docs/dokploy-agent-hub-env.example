@@ -1,5 +1,6 @@
 # PEGAR EN DOKPLOY > AGENTE INTELIGENTE COMERCIAL > ENVIRONMENT
-# No pegar estas credenciales en Supabase, CRM, Vite ni GitHub.
+# No pegar credenciales reales en Supabase SQL, CRM frontend, Vite ni GitHub.
+# Este archivo es una plantilla: reemplaza solo los valores PEGAR_* / REEMPLAZAR.
 
 ENV=production
 DATABASE_URL=postgresql+asyncpg://USUARIO:CLAVE@db:5432/clima_agent
@@ -14,6 +15,12 @@ CRM_WORKER_ID=climactiva-worker-01
 CRM_TIMEOUT_SECONDS=15
 
 # Facto ERP - SOLO LECTURA
+# Mapeo de nombres Facto:
+# - Client Identification  -> FACTO_CLIENT_ID
+# - Client Secret          -> FACTO_CLIENT_SECRET
+# - Resource Owner Name    -> FACTO_USERNAME
+# - Resource Owner Password-> FACTO_PASSWORD
+# - Account ID             -> conservar como referencia administrativa; no se usa todavia.
 FACTO_ENABLED=false
 FACTO_API_BASE_URL=https://api-billing.koywe.com/V1
 FACTO_CLIENT_ID=PEGAR_MANANA
@@ -25,9 +32,13 @@ FACTO_SYNC_INTERVAL_MINUTES=30
 FACTO_REQUEST_TIMEOUT_SECONDS=30
 
 # Tiendanube climactiva.cl - SOLO LECTURA
+# TIENDANUBE_STORE_ID debe ser el user_id/store_id devuelto al crear el token.
+# Para la tienda Climactiva, soporte informo el ID 8020411.
+# TIENDANUBE_ACCESS_TOKEN es el access_token generado por OAuth; no expira salvo
+# que desinstales/reinstales la app o cambies scopes.
 TIENDANUBE_ENABLED=false
 TIENDANUBE_API_BASE_URL=https://api.tiendanube.com/2025-03
-TIENDANUBE_STORE_ID=PEGAR_MANANA
+TIENDANUBE_STORE_ID=8020411
 TIENDANUBE_ACCESS_TOKEN=PEGAR_MANANA
 TIENDANUBE_USER_AGENT=ClimaActivaCRM/1.0 (msanhueza@latinchile.cl)
 TIENDANUBE_READ_ONLY=true
@@ -44,4 +55,5 @@ GOOGLE_MAPS_API_KEY=CONSERVAR_VALOR_ACTUAL
 BRAVE_SEARCH_API_KEY=CONSERVAR_VALOR_ACTUAL
 SESSION_SECRET_KEY=CONSERVAR_VALOR_ACTUAL
 
-# Meta permanece diferido hasta su aprobacion.
+# Meta permanece diferido hasta aprobacion/revision.
+META_WHATSAPP_ENABLED=false
