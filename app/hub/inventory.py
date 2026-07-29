@@ -15,6 +15,8 @@ import re
 from typing import Any, Iterable
 import unicodedata
 
+CHILE_VAT_FACTOR = Decimal("1.19")
+
 
 def _first(data: dict[str, Any], *keys: str) -> Any:
     for key in keys:
@@ -346,16 +348,18 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
             cost_value = _first(cost_value, "value", "amount", "unit_cost", "valor")
         unit_cost = _decimal(cost_value)
         cost_is_usd = explicit_usd_cost or str(cost_currency_code or "").upper() == "USD"
-        price_value = _first(
-            product,
-            "price",
-            "sale_price",
-            "retail_price",
-            "selling_price",
-            "precio",
-            "precio_neto",
-            "precioNeto",
-        )
+        explicit_net_price = _first(product, "precio_neto", "precioNeto")
+        price_value = explicit_net_price
+        price_is_net = explicit_net_price is not None
+        if price_value is None:
+            price_value = _first(
+                product,
+                "price",
+                "sale_price",
+                "retail_price",
+                "selling_price",
+                "precio",
+            )
         prices = product.get("prices") or product.get("price")
         price_currency_id: Any = None
         price_currency_code: Any = None
@@ -369,9 +373,10 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                     "currency_code",
                     "currencyCode",
                 )
-                price_value = _first(
+                explicit_net_price = _first(first_price, "unit_net")
+                price_is_net = explicit_net_price is not None
+                price_value = explicit_net_price or _first(
                     first_price,
-                    "unit_net",
                     "unit_total",
                     "value",
                     "amount",
@@ -384,8 +389,20 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                 "currency_code",
                 "currencyCode",
             )
-            price_value = _first(price_value, "unit_net", "unit_total", "value", "amount")
-        unit_price = _decimal(price_value)
+            explicit_net_price = _first(price_value, "unit_net")
+            price_is_net = explicit_net_price is not None
+            price_value = explicit_net_price or _first(
+                price_value,
+                "unit_total",
+                "value",
+                "amount",
+            )
+        source_unit_price = _decimal(price_value)
+        unit_price = (
+            source_unit_price
+            if price_is_net
+            else source_unit_price / CHILE_VAT_FACTOR
+        )
         units_sold = sold_units[sku]
         demand = (units_sold / Decimal(period_days)) if period_days else Decimal("0")
         margin_value = unit_price - unit_cost if cost_value is not None and price_value is not None else None
@@ -451,6 +468,9 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                     "cost_available_in_source": cost_value is not None,
                     "cost_requires_usd_conversion": cost_value is not None and not cost_is_usd,
                     "unit_price": float(unit_price),
+                    "unit_price_source": float(source_unit_price),
+                    "unit_price_is_net": True,
+                    "source_price_includes_tax": not price_is_net,
                     "price_known": price_value is not None,
                     "price_currency_id": price_currency_id,
                     "price_currency_code": price_currency_code,

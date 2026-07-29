@@ -187,6 +187,8 @@ def test_inventory_snapshot_finds_provider_specific_envelope() -> None:
 
     assert snapshots[0]["payload"]["sku"] == "P-1"
     assert snapshots[0]["payload"]["available_units"] == 9.0
+    assert round(snapshots[0]["payload"]["unit_price"], 2) == 6.72
+    assert snapshots[0]["payload"]["source_price_includes_tax"] is True
 
 
 def test_inventory_snapshot_reads_facto_product_and_document_details() -> None:
@@ -227,6 +229,8 @@ def test_inventory_snapshot_reads_facto_product_and_document_details() -> None:
     assert snapshot["cost_known"] is False
     assert snapshot["cost_requires_usd_conversion"] is True
     assert snapshot["unit_price"] == 8000.0
+    assert snapshot["unit_price_is_net"] is True
+    assert snapshot["source_price_includes_tax"] is False
     assert snapshot["average_daily_demand"] == 1.0
     assert snapshot["demand_available"] is True
 
@@ -342,6 +346,8 @@ def test_inventory_snapshot_reads_facto_price_list_from_product_detail() -> None
     snapshot = snapshots[0]["payload"]
     assert snapshot["available_units"] == 96.0
     assert snapshot["unit_price"] == 25740.0
+    assert snapshot["unit_price_source"] == 25740.0
+    assert snapshot["unit_price_is_net"] is True
     assert snapshot["price_known"] is True
     assert snapshot["price_currency_id"] == "39"
     assert snapshot["unit_margin"] == 12504.0
