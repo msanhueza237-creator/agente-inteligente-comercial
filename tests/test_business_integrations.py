@@ -3,7 +3,7 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.integrations.facto import FactoClient
-from app.integrations.tiendanube import TiendanubeClient
+from app.integrations.tiendanube import TiendanubeClient, TiendanubeError
 
 
 def settings_for_tests(**changes) -> Settings:
@@ -58,3 +58,28 @@ async def test_tiendanube_uses_bearer_header_and_store_path() -> None:
     assert captured[0].url.path.endswith("/2025-03/123/products")
     assert captured[0].headers["Authorization"] == "Bearer token"
     assert not hasattr(client, "post")
+
+
+async def test_tiendanube_error_includes_provider_detail() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={"error": "invalid_token", "message": "Token is invalid"},
+        )
+
+    client = TiendanubeClient(
+        settings_for_tests(
+            tiendanube_enabled=True,
+            tiendanube_store_id="123",
+            tiendanube_access_token=SecretStr("token"),
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        await client.products(per_page=1)
+    except TiendanubeError as exc:
+        assert "401" in str(exc)
+        assert "Token is invalid" in str(exc)
+    else:
+        raise AssertionError("Expected TiendanubeError")

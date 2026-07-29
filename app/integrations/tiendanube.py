@@ -85,8 +85,29 @@ class TiendanubeClient:
                 break
             await asyncio.sleep(min(2**attempt, 4))
         if response.status_code >= 400:
-            raise TiendanubeError(f"Tiendanube devolvio un error ({response.status_code})")
+            raise TiendanubeError(
+                f"Tiendanube devolvio un error ({response.status_code}): "
+                f"{self._safe_error_detail(response)}"
+            )
         return response.json()
+
+    def _safe_error_detail(self, response: httpx.Response) -> str:
+        try:
+            body = response.json()
+        except ValueError:
+            body_text = response.text.strip().replace("\n", " ")
+            return body_text[:240] if body_text else "sin detalle"
+
+        if isinstance(body, dict):
+            detail = (
+                body.get("message")
+                or body.get("error_description")
+                or body.get("error")
+                or body.get("description")
+                or body
+            )
+            return str(detail)[:240]
+        return str(body)[:240]
 
     async def store(self) -> Any:
         return await self.get("store")
