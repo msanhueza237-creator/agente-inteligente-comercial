@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from datetime import date, timedelta
 
 from app.config import get_settings
 from app.hub.agents import AgentRegistry
@@ -14,6 +15,10 @@ from app.integrations.tiendanube import TiendanubeClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("clima_activa.hub")
+
+# Facto detail responses are stable after issuance. Keep them in memory so the
+# 30-minute monitor only requests new documents after the first full sync.
+_facto_document_detail_cache: dict[str, dict] = {}
 
 
 class AgentHubWorker:
@@ -135,7 +140,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                         raw_documents = {}
                         snapshot_documents = raw_documents
                         try:
-                            raw_documents = await client.documents(page=1)
+                            raw_documents = await load_facto_sales_documents(client)
                             snapshot_documents = raw_documents
                             await crm.upsert_integration_records(
                                 provider="facto",
@@ -211,19 +216,78 @@ async def load_facto_details(
         document_id = row.get("document_id") or row.get("id")
         if document_id is None:
             return row
+        cache_key = str(document_id)
+        if cache_key in _facto_document_detail_cache:
+            return _facto_document_detail_cache[cache_key]
         async with semaphore:
             try:
                 detail = await client.document(document_id)
             except Exception:  # noqa: BLE001
                 logger.warning("Facto document detail unavailable id=%s", document_id)
                 return row
-        return detail if isinstance(detail, dict) else row
+        result = detail if isinstance(detail, dict) else row
+        if isinstance(result, dict):
+            _facto_document_detail_cache[cache_key] = result
+        return result
 
     product_rows = payload_rows(products_payload, "data", "products", "items")
     document_rows = payload_rows(documents_payload, "data", "documents", "items")
     products = await asyncio.gather(*(product_detail(row) for row in product_rows))
-    documents = await asyncio.gather(*(document_detail(row) for row in document_rows[:100]))
+    documents = await asyncio.gather(*(document_detail(row) for row in document_rows))
     return list(products), list(documents)
+
+
+def _facto_document_type_id(row: dict) -> int | None:
+    value = (
+        row.get("document_type_id")
+        or row.get("type_id")
+        or row.get("document_type")
+    )
+    if isinstance(value, dict):
+        value = value.get("document_type_id") or value.get("id")
+    if value is None and isinstance(row.get("header"), dict):
+        return _facto_document_type_id(row["header"])
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_facto_sales_document(row: dict) -> bool:
+    """Keep emitted invoices/receipts and exclude credits and dispatch guides."""
+
+    # IDs verified against the connected Facto document-type catalog:
+    # 2 invoice, 28 exempt invoice and 37 electronic receipt.
+    return _facto_document_type_id(row) in {2, 28, 37}
+
+
+async def load_facto_sales_documents(
+    client: FactoClient,
+    *,
+    observation_days: int = 365,
+    max_pages: int = 20,
+) -> list[dict]:
+    """Load one auditable year of issued Facto sales document summaries."""
+
+    end = date.today()
+    start = end - timedelta(days=max(1, observation_days) - 1)
+    collected: list[dict] = []
+    for page in range(1, max_pages + 1):
+        payload = await client.documents(
+            page=page,
+            per_page=100,
+            issue_date_from=start.isoformat(),
+            issue_date_to=end.isoformat(),
+            order_by="desc",
+            document_status=1,
+        )
+        rows = payload_rows(payload, "documents", "items")
+        collected.extend(row for row in rows if _is_facto_sales_document(row))
+        if not rows or _is_explicit_last_page(payload, page):
+            break
+    else:
+        logger.warning("Facto sales pagination reached safety limit pages=%s", max_pages)
+    return collected
 
 
 async def load_paginated_records(
@@ -285,6 +349,7 @@ def _is_explicit_last_page(payload, page: int) -> bool:
             or data.get("lastPage")
             or data.get("total_pages")
             or data.get("totalPages")
+            or data.get("page_count")
             or data.get("pages")
         )
         try:

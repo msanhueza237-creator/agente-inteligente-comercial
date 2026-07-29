@@ -117,8 +117,28 @@ class FactoClient:
     async def customers(self, *, page: int = 1) -> Any:
         return await self.get("clients", params={"page": max(1, page)})
 
-    async def documents(self, *, page: int = 1) -> Any:
-        return await self.get("documents", params={"page": max(1, page)})
+    async def documents(
+        self,
+        *,
+        page: int = 1,
+        per_page: int | None = None,
+        issue_date_from: str | None = None,
+        issue_date_to: str | None = None,
+        order_by: str | None = None,
+        document_status: int | None = None,
+    ) -> Any:
+        params: dict[str, Any] = {"page": max(1, page)}
+        if per_page is not None:
+            params["per_page"] = max(1, min(per_page, 100))
+        if issue_date_from:
+            params["issue_date_from"] = issue_date_from
+        if issue_date_to:
+            params["issue_date_to"] = issue_date_to
+        if order_by:
+            params["order_by"] = order_by
+        if document_status is not None:
+            params["document_status"] = document_status
+        return await self.get("documents", params=params)
 
     async def document(self, document_id: str | int) -> Any:
         return await self.get(f"documents/{document_id}")

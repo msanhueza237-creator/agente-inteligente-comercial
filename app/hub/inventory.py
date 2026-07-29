@@ -11,7 +11,9 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+import re
 from typing import Any, Iterable
+import unicodedata
 
 
 def _first(data: dict[str, Any], *keys: str) -> Any:
@@ -173,6 +175,14 @@ def _document_date(document: dict[str, Any]) -> date | None:
             return None
 
 
+def _normalized_text(value: Any) -> str:
+    """Normalize a provider label for conservative exact product matching."""
+
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(character for character in text if not unicodedata.combining(character))
+    return re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+
+
 def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> list[dict[str, Any]]:
     """Build SKU snapshots using explicit product stock/cost and sale documents.
 
@@ -181,12 +191,40 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
     from proposing an order when sales history is not yet complete.
     """
 
+    product_rows = payload_rows(products_payload, "data", "products", "items")
+    product_skus: set[str] = set()
+    normalized_names: dict[str, list[str]] = defaultdict(list)
+    for product in product_rows:
+        sku_value = _first(
+            product,
+            "sku",
+            "code",
+            "product_code",
+            "codigo",
+            "codigo_producto",
+            "codigoProducto",
+            "id",
+        )
+        if sku_value is None:
+            continue
+        sku = str(sku_value).strip()
+        product_skus.add(sku)
+        normalized_name = _normalized_text(
+            _first(product, "name", "title", "description", "nombre", "descripcion")
+        )
+        if normalized_name:
+            normalized_names[normalized_name].append(sku)
+
     sold_units: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    sales_revenue: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    sales_document_ids: dict[str, set[str]] = defaultdict(set)
+    last_sale_dates: dict[str, date] = {}
     document_dates: list[date] = []
     for document in payload_rows(documents_payload, "data", "documents", "items"):
         document_date = _document_date(document)
         if document_date:
             document_dates.append(document_date)
+        document_id = str(_first(document, "document_id", "id") or "")
         for line in _line_rows(document):
             sku = _first(
                 line,
@@ -203,12 +241,47 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                 if isinstance(product, dict):
                     sku = _first(product, "sku", "code", "id")
             if sku is None:
+                line_name = _normalized_text(
+                    _first(
+                        line,
+                        "line_description",
+                        "description",
+                        "name",
+                        "product_name",
+                        "descripcion",
+                    )
+                )
+                matches = normalized_names.get(line_name, [])
+                # Facto production invoices expose only ``line_description``.
+                # Consolidate automatically only when that public label maps
+                # to exactly one catalog product.
+                if len(matches) == 1:
+                    sku = matches[0]
+            if sku is None or str(sku).strip() not in product_skus:
                 continue
+            sku = str(sku).strip()
             quantity = _decimal(
                 _first(line, "quantity", "qty", "units", "amount", "cantidad")
             )
             if quantity > 0:
-                sold_units[str(sku).strip()] += quantity
+                sold_units[sku] += quantity
+                unit_price = _decimal(
+                    _first(
+                        line,
+                        "unit_price",
+                        "unit_net",
+                        "price",
+                        "precio_unitario",
+                        "precio",
+                    )
+                )
+                sales_revenue[sku] += quantity * unit_price
+                if document_id:
+                    sales_document_ids[sku].add(document_id)
+                if document_date and (
+                    sku not in last_sale_dates or document_date > last_sale_dates[sku]
+                ):
+                    last_sale_dates[sku] = document_date
 
     if document_dates:
         period_days = max(1, (max(document_dates) - min(document_dates)).days + 1)
@@ -216,7 +289,7 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
         period_days = 0
 
     snapshots: list[dict[str, Any]] = []
-    for product in payload_rows(products_payload, "data", "products", "items"):
+    for product in product_rows:
         sku_value = _first(
             product,
             "sku",
@@ -384,9 +457,26 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                     "unit_margin": float(margin_value) if margin_value is not None else None,
                     "margin_percent": float(margin_pct) if margin_pct is not None else None,
                     "average_daily_demand": float(demand),
-                    "demand_available": bool(period_days and units_sold > 0),
+                    # A complete period with zero units is real evidence of no
+                    # movement, not missing information.
+                    "demand_available": bool(period_days),
                     "sales_history_available": bool(period_days),
+                    "has_observed_sales": units_sold > 0,
                     "units_sold_observed": float(units_sold),
+                    "sales_revenue_observed": float(sales_revenue[sku]),
+                    "sales_document_count": len(sales_document_ids[sku]),
+                    "last_sale_at": (
+                        last_sale_dates[sku].isoformat()
+                        if sku in last_sale_dates
+                        else None
+                    ),
+                    "sales_history_start": (
+                        min(document_dates).isoformat() if document_dates else None
+                    ),
+                    "sales_history_end": (
+                        max(document_dates).isoformat() if document_dates else None
+                    ),
+                    "sales_match_method": "sku_or_exact_normalized_product_name",
                     "demand_observation_days": period_days,
                     "source": "facto_read_only",
                 },
