@@ -116,7 +116,11 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                     message=health.message,
                 )
                 if health.connected:
-                    raw_products = await client.products(page=1)
+                    raw_products = (
+                        await load_paginated_records(client.products, row_keys=("products", "items"))
+                        if provider == "facto"
+                        else await client.products(page=1)
+                    )
                     snapshot_products = raw_products
                     records = normalize_product_records(raw_products)
                     await crm.upsert_integration_records(
@@ -217,15 +221,88 @@ async def load_facto_details(
 
     product_rows = payload_rows(products_payload, "data", "products", "items")
     document_rows = payload_rows(documents_payload, "data", "documents", "items")
-    products = await asyncio.gather(*(product_detail(row) for row in product_rows[:100]))
+    products = await asyncio.gather(*(product_detail(row) for row in product_rows))
     documents = await asyncio.gather(*(document_detail(row) for row in document_rows[:100]))
     return list(products), list(documents)
+
+
+async def load_paginated_records(
+    page_loader,
+    *,
+    row_keys: tuple[str, ...] = ("data", "items"),
+    max_pages: int = 200,
+) -> list[dict]:
+    """Load every provider page without trusting one specific pagination envelope.
+
+    Facto installations do not all expose the same metadata.  The worker
+    therefore advances until an empty page, a repeated page, an explicit last
+    page or a short page after the first response.  A hard upper bound protects
+    the ERP from an accidental infinite loop.
+    """
+
+    collected: list[dict] = []
+    fingerprints: set[str] = set()
+    expected_page_size: int | None = None
+
+    for page in range(1, max_pages + 1):
+        payload = await page_loader(page=page)
+        rows = payload_rows(payload, *row_keys)
+        if not rows:
+            break
+
+        fingerprint = hashlib.sha256(
+            json.dumps(rows, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        if fingerprint in fingerprints:
+            logger.warning("provider repeated page=%s; pagination stopped safely", page)
+            break
+        fingerprints.add(fingerprint)
+        collected.extend(rows)
+
+        if expected_page_size is None:
+            expected_page_size = len(rows)
+        if _is_explicit_last_page(payload, page):
+            break
+        if expected_page_size and len(rows) < expected_page_size:
+            break
+    else:
+        logger.warning("provider pagination reached safety limit pages=%s", max_pages)
+
+    return collected
+
+
+def _is_explicit_last_page(payload, page: int) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    candidates = [payload]
+    for key in ("pagination", "meta", "paging"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+    for data in candidates:
+        last_page = (
+            data.get("last_page")
+            or data.get("lastPage")
+            or data.get("total_pages")
+            or data.get("totalPages")
+            or data.get("pages")
+        )
+        try:
+            if last_page is not None and page >= int(last_page):
+                return True
+        except (TypeError, ValueError):
+            pass
+        if data.get("next") is None and any(
+            key in data for key in ("next", "next_page", "nextPage")
+        ):
+            return True
+    return False
 
 
 def normalize_product_records(payload) -> list[dict]:
     rows = payload_rows(payload, "data", "products", "documents", "items")
     result: list[dict] = []
-    for index, row in enumerate(rows[:100]):
+    for index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
         external_id = (

@@ -167,17 +167,22 @@ class HubCRMPort:
     ) -> None:
         if not records:
             return
-        payload = {
-            "provider": provider,
-            "resource": resource,
-            "records": records[:100],
-        }
-        await self._request(
-            "POST",
-            "hub/integrations/records/batch",
-            payload=payload,
-            idempotency_key=self._stable_key(provider, resource, payload),
-        )
+        for offset in range(0, len(records), 100):
+            payload = {
+                "provider": provider,
+                "resource": resource,
+                "records": records[offset : offset + 100],
+            }
+            await self._request(
+                "POST",
+                "hub/integrations/records/batch",
+                payload=payload,
+                idempotency_key=self._stable_key(
+                    provider,
+                    f"{resource}:{offset // 100}",
+                    payload,
+                ),
+            )
 
     @staticmethod
     def _stable_key(resource_id: str, action: str, payload: dict) -> str:

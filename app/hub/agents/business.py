@@ -97,6 +97,28 @@ class LogisticsAgent(BusinessAgent):
             and self._number(item, "available_units")
             <= self._number(item, "average_daily_demand") * Decimal("30")
         ]
+        with_stock = [item for item in products if item.get("stock_known")]
+        in_stock = [
+            item for item in with_stock if self._number(item, "available_units") > 0
+        ]
+        out_of_stock = [
+            item for item in with_stock if self._number(item, "available_units") <= 0
+        ]
+        with_source_cost = [
+            item for item in products if item.get("cost_available_in_source")
+        ]
+        total_units = sum(
+            (self._number(item, "available_units") for item in with_stock),
+            Decimal("0"),
+        )
+        source_inventory_value = sum(
+            (
+                self._number(item, "available_units")
+                * self._number(item, "unit_cost_source")
+                for item in with_source_cost
+            ),
+            Decimal("0"),
+        )
 
         def compact(item: dict[str, Any]) -> dict[str, Any]:
             return {
@@ -150,6 +172,12 @@ class LogisticsAgent(BusinessAgent):
             ),
             metrics={
                 "products": len(products),
+                "stock_known": len(with_stock),
+                "in_stock": len(in_stock),
+                "out_of_stock": len(out_of_stock),
+                "total_available_units": float(total_units),
+                "source_cost_known": len(with_source_cost),
+                "source_inventory_value": float(source_inventory_value),
                 "with_sales_history": len(with_sales),
                 "slow_moving": len(slow_moving),
                 "high_rotation_low_stock": len(high_rotation_low_stock),
@@ -159,6 +187,14 @@ class LogisticsAgent(BusinessAgent):
                     "logistics_report": {
                         "top_rotation": [compact(item) for item in ranked_rotation[:10]],
                         "top_margin": [compact(item) for item in ranked_margin[:10]],
+                        "top_stock": [
+                            compact(item)
+                            for item in sorted(
+                                in_stock,
+                                key=lambda item: self._number(item, "available_units"),
+                                reverse=True,
+                            )[:20]
+                        ],
                         "slow_moving": [compact(item) for item in slow_moving[:20]],
                         "high_rotation_low_stock": [compact(item) for item in high_rotation_low_stock[:20]],
                     }

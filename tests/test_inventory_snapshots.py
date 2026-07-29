@@ -1,5 +1,5 @@
 from app.hub.inventory import eligible_replenishment_payloads, extract_product_snapshots
-from app.hub.worker import load_facto_details
+from app.hub.worker import load_facto_details, load_paginated_records
 
 
 def test_inventory_snapshot_requires_explicit_stock_cost_and_sales_evidence() -> None:
@@ -150,3 +150,26 @@ async def test_load_facto_details_expands_list_rows() -> None:
 
     assert products[0]["inventories"]["total_available"] == 7
     assert documents[0]["details"][0]["sku"] == "P-1"
+
+
+async def test_load_paginated_records_reads_all_pages() -> None:
+    async def loader(*, page: int):
+        pages = {
+            1: {"products": [{"id": 1}, {"id": 2}]},
+            2: {"products": [{"id": 3}, {"id": 4}]},
+            3: {"products": [{"id": 5}]},
+        }
+        return pages.get(page, {"products": []})
+
+    rows = await load_paginated_records(loader, row_keys=("products",))
+
+    assert [row["id"] for row in rows] == [1, 2, 3, 4, 5]
+
+
+async def test_load_paginated_records_stops_on_repeated_provider_page() -> None:
+    async def loader(*, page: int):
+        return {"products": [{"id": 1}, {"id": 2}]}
+
+    rows = await load_paginated_records(loader, row_keys=("products",))
+
+    assert len(rows) == 2
