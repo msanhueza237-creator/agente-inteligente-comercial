@@ -13,6 +13,9 @@ class HubCRMError(RuntimeError):
     pass
 
 
+INTEGRATION_RECORD_BATCH_SIZE = 25
+
+
 class HubCRMPort:
     def __init__(self, *, base_url: str, api_key: str, timeout: float = 15) -> None:
         self.base_url = base_url.rstrip("/") + "/"
@@ -167,11 +170,13 @@ class HubCRMPort:
     ) -> None:
         if not records:
             return
-        for offset in range(0, len(records), 100):
+        for offset in range(0, len(records), INTEGRATION_RECORD_BATCH_SIZE):
             payload = {
                 "provider": provider,
                 "resource": resource,
-                "records": records[offset : offset + 100],
+                "records": records[
+                    offset : offset + INTEGRATION_RECORD_BATCH_SIZE
+                ],
             }
             await self._request(
                 "POST",
@@ -179,7 +184,7 @@ class HubCRMPort:
                 payload=payload,
                 idempotency_key=self._stable_key(
                     provider,
-                    f"{resource}:{offset // 100}",
+                    f"{resource}:{offset // INTEGRATION_RECORD_BATCH_SIZE}",
                     payload,
                 ),
             )
