@@ -8,6 +8,20 @@ from typing import Any
 from app.hub.inventory import payload_rows
 
 VAT_FACTOR = Decimal("1.19")
+MONTH_LABELS = (
+    "Ene",
+    "Feb",
+    "Mar",
+    "Abr",
+    "May",
+    "Jun",
+    "Jul",
+    "Ago",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dic",
+)
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -205,9 +219,80 @@ def _customer(document: dict[str, Any]) -> tuple[str, str]:
     return name, tax_id
 
 
+def _annual_comparison(
+    dated_amounts: list[tuple[date, Decimal]],
+    *,
+    generated_on: date,
+) -> dict[str, Any]:
+    """Compare current YTD sales with the equivalent period a year earlier."""
+
+    current_year = generated_on.year
+    previous_year = current_year - 1
+    # The Facto query itself closes on generated_on. Days without sales are
+    # therefore real zero-sales days and must remain part of the comparison.
+    cutoff = generated_on
+    try:
+        previous_cutoff = cutoff.replace(year=previous_year)
+    except ValueError:
+        # 29 February compares against 28 February in a non-leap prior year.
+        previous_cutoff = cutoff.replace(year=previous_year, day=28)
+
+    monthly_current = {month: Decimal("0") for month in range(1, 13)}
+    monthly_previous = {month: Decimal("0") for month in range(1, 13)}
+    current_ytd = Decimal("0")
+    previous_ytd = Decimal("0")
+    previous_full_year = Decimal("0")
+    current_documents = 0
+    previous_documents = 0
+
+    for issued, net in dated_amounts:
+        if issued.year == current_year:
+            monthly_current[issued.month] += net
+            if issued <= cutoff:
+                current_ytd += net
+                current_documents += 1
+        elif issued.year == previous_year:
+            monthly_previous[issued.month] += net
+            previous_full_year += net
+            if issued <= previous_cutoff:
+                previous_ytd += net
+                previous_documents += 1
+
+    growth_amount = current_ytd - previous_ytd
+    growth_percent = (
+        (growth_amount / previous_ytd) * Decimal("100")
+        if previous_ytd
+        else None
+    )
+    return {
+        "current_year": current_year,
+        "previous_year": previous_year,
+        "cutoff_date": cutoff.isoformat(),
+        "previous_cutoff_date": previous_cutoff.isoformat(),
+        "current_ytd_net_sales": float(current_ytd),
+        "previous_ytd_net_sales": float(previous_ytd),
+        "previous_full_year_net_sales": float(previous_full_year),
+        "growth_amount": float(growth_amount),
+        "growth_percent": float(growth_percent) if growth_percent is not None else None,
+        "current_ytd_documents": current_documents,
+        "previous_ytd_documents": previous_documents,
+        "months": [
+            {
+                "month": month,
+                "label": MONTH_LABELS[month - 1],
+                "current_net_sales": float(monthly_current[month]),
+                "previous_net_sales": float(monthly_previous[month]),
+            }
+            for month in range(1, 13)
+        ],
+    }
+
+
 def extract_financial_snapshot(
     documents_payload: Any,
     product_snapshots: list[dict[str, Any]] | None = None,
+    *,
+    generated_on: date | None = None,
 ) -> list[dict[str, Any]]:
     """Create one auditable rolling financial summary from issued Facto documents.
 
@@ -224,6 +309,7 @@ def extract_financial_snapshot(
         lambda: {"net_sales": Decimal("0"), "documents": 0}
     )
     dates: list[date] = []
+    dated_amounts: list[tuple[date, Decimal]] = []
     net_sales = Decimal("0")
     tax = Decimal("0")
     gross_sales = Decimal("0")
@@ -235,6 +321,8 @@ def extract_financial_snapshot(
         if issued:
             dates.append(issued)
         net, document_tax, gross = _amounts(document)
+        if issued:
+            dated_amounts.append((issued, net))
         net_sales += net
         tax += document_tax
         gross_sales += gross
@@ -295,6 +383,10 @@ def extract_financial_snapshot(
             {"month": month, **{key: float(value) if isinstance(value, Decimal) else value for key, value in values.items()}}
             for month, values in sorted(monthly.items())
         ],
+        "year_comparison": _annual_comparison(
+            dated_amounts,
+            generated_on=generated_on or date.today(),
+        ),
         "document_types": [
             {"document_type_id": key, **{name: float(value) if isinstance(value, Decimal) else value for name, value in values.items()}}
             for key, values in document_types.items()

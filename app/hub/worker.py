@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date
 
 from app.config import get_settings
 from app.hub.agents import AgentRegistry
@@ -274,13 +274,15 @@ def _is_facto_sales_document(row: dict) -> bool:
 async def load_facto_sales_documents(
     client: FactoClient,
     *,
-    observation_days: int = 365,
+    history_start: date | None = None,
     max_pages: int = 20,
 ) -> list[dict]:
-    """Load one auditable year of issued Facto sales document summaries."""
+    """Load issued Facto sales documents from the auditable finance baseline."""
 
     end = date.today()
-    start = end - timedelta(days=max(1, observation_days) - 1)
+    # The finance dashboard compares the current year with all of 2025.
+    # Keep this baseline explicit so it does not silently move every day.
+    start = history_start or date(2025, 1, 1)
     collected: list[dict] = []
     for page in range(1, max_pages + 1):
         payload = await client.documents(

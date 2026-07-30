@@ -389,7 +389,7 @@ async def test_load_paginated_records_reads_all_pages() -> None:
     assert [row["id"] for row in rows] == [1, 2, 3, 4, 5]
 
 
-async def test_load_facto_sales_documents_filters_and_paginates_one_year() -> None:
+async def test_load_facto_sales_documents_filters_and_paginates_since_2025() -> None:
     class Client:
         calls = []
 
@@ -419,6 +419,7 @@ async def test_load_facto_sales_documents_filters_and_paginates_one_year() -> No
     assert len(client.calls) == 2
     assert client.calls[0]["per_page"] == 100
     assert client.calls[0]["document_status"] == 1
+    assert client.calls[0]["issue_date_from"] == "2025-01-01"
 
 
 async def test_load_paginated_records_stops_on_repeated_provider_page() -> None:

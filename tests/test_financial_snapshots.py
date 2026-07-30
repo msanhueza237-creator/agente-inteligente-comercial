@@ -1,3 +1,5 @@
+from datetime import date
+
 from app.hub.finance import extract_financial_snapshot
 
 
@@ -109,3 +111,56 @@ def test_financial_snapshot_keeps_full_customer_ranking() -> None:
     assert report["customer_count"] == 35
     assert len(report["top_customers"]) == 35
     assert report["top_customers"][0]["name"] == "Cliente 35"
+
+
+def test_financial_snapshot_compares_ytd_with_same_prior_year_period() -> None:
+    documents = [
+        {
+            "document_type_id": 28,
+            "issue_date": "2025-01-10",
+            "total_amount": 100000,
+        },
+        {
+            "document_type_id": 28,
+            "issue_date": "2025-07-15",
+            "total_amount": 200000,
+        },
+        {
+            "document_type_id": 28,
+            "issue_date": "2025-12-10",
+            "total_amount": 400000,
+        },
+        {
+            "document_type_id": 28,
+            "issue_date": "2026-01-12",
+            "total_amount": 150000,
+        },
+        {
+            "document_type_id": 28,
+            "issue_date": "2026-07-15",
+            "total_amount": 300000,
+        },
+    ]
+
+    comparison = extract_financial_snapshot(
+        documents,
+        generated_on=date(2026, 7, 15),
+    )[0]["payload"]["year_comparison"]
+
+    assert comparison["current_year"] == 2026
+    assert comparison["previous_year"] == 2025
+    assert comparison["cutoff_date"] == "2026-07-15"
+    assert comparison["previous_cutoff_date"] == "2025-07-15"
+    assert comparison["current_ytd_net_sales"] == 450000
+    assert comparison["previous_ytd_net_sales"] == 300000
+    assert comparison["previous_full_year_net_sales"] == 700000
+    assert comparison["growth_amount"] == 150000
+    assert comparison["growth_percent"] == 50
+    assert comparison["current_ytd_documents"] == 2
+    assert comparison["previous_ytd_documents"] == 2
+    assert comparison["months"][0] == {
+        "month": 1,
+        "label": "Ene",
+        "current_net_sales": 150000,
+        "previous_net_sales": 100000,
+    }
