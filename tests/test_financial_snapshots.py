@@ -164,3 +164,24 @@ def test_financial_snapshot_compares_ytd_with_same_prior_year_period() -> None:
         "current_net_sales": 150000,
         "previous_net_sales": 100000,
     }
+
+
+def test_financial_snapshot_uses_latest_synchronized_document_as_cutoff() -> None:
+    report = extract_financial_snapshot(
+        [
+            {
+                "document_type_id": 28,
+                "issue_date": "2025-07-29",
+                "total_amount": 100000,
+            },
+            {
+                "document_type_id": 28,
+                "issue_date": "2026-07-29",
+                "total_amount": 200000,
+            },
+        ]
+    )[0]["payload"]
+
+    assert report["period_end"] == "2026-07-29"
+    assert report["year_comparison"]["cutoff_date"] == "2026-07-29"
+    assert report["year_comparison"]["previous_cutoff_date"] == "2025-07-29"

@@ -228,8 +228,8 @@ def _annual_comparison(
 
     current_year = generated_on.year
     previous_year = current_year - 1
-    # The Facto query itself closes on generated_on. Days without sales are
-    # therefore real zero-sales days and must remain part of the comparison.
+    # The cutoff is either supplied by the caller or derived from the latest
+    # issued document, so the comparison never extends past synchronized data.
     cutoff = generated_on
     try:
         previous_cutoff = cutoff.replace(year=previous_year)
@@ -367,6 +367,7 @@ def extract_financial_snapshot(
     products.sort(key=lambda item: item["net_sales_observed"], reverse=True)
     top_customers = sorted(customers.values(), key=lambda item: item["net_sales"], reverse=True)
     document_count = len(documents)
+    comparison_cutoff = generated_on or (max(dates) if dates else date.today())
     snapshot = {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "period_start": min(dates).isoformat() if dates else None,
@@ -385,7 +386,7 @@ def extract_financial_snapshot(
         ],
         "year_comparison": _annual_comparison(
             dated_amounts,
-            generated_on=generated_on or date.today(),
+            generated_on=comparison_cutoff,
         ),
         "document_types": [
             {"document_type_id": key, **{name: float(value) if isinstance(value, Decimal) else value for name, value in values.items()}}
