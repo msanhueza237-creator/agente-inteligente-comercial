@@ -160,15 +160,48 @@ class FinanceAgent(BusinessAgent):
 
 class CollectionsAgent(BusinessAgent):
     async def execute(self, task: HubTask) -> AgentResult:
+        if (
+            task.payload.get("source") != "facto_receivables"
+            or not task.payload.get("authoritative")
+        ):
+            return AgentResult(
+                summary=(
+                    "Facto aun no entrego el recurso oficial Cobranza -> Documentos "
+                    "impagos. El agente no calculara deuda desde facturas ni pagos."
+                ),
+                metrics={
+                    "overdue_amount": 0,
+                    "official_receivables_available": False,
+                },
+                warnings=[
+                    "Esperando la ruta oficial de solo lectura solicitada a soporte de Facto"
+                ],
+            )
         overdue = Decimal(str(task.payload.get("overdue_amount", 0)))
         proposal = ActionProposal(
             kind=ProposalKind.collection_reminder,
             title="Recordatorios de cobranza para aprobar",
             summary=f"Cartera vencida informada: {overdue:.2f}. No se enviaran mensajes automaticamente.",
-            payload={"invoice_ids": task.payload.get("invoice_ids", [])},
+            payload={
+                "invoice_ids": task.payload.get("invoice_ids", []),
+                "source": "facto_receivables",
+            },
             risk_level="high",
         )
-        return AgentResult(summary=proposal.summary, metrics={"overdue_amount": float(overdue)}, proposals=[proposal])
+        return AgentResult(
+            summary=proposal.summary,
+            metrics={
+                "overdue_amount": float(overdue),
+                "official_receivables_available": True,
+            },
+            evidence=[
+                {
+                    "source": "facto_receivables",
+                    "documents": task.payload.get("documents", []),
+                }
+            ],
+            proposals=[proposal],
+        )
 
 
 class LogisticsAgent(BusinessAgent):

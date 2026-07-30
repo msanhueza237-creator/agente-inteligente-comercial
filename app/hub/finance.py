@@ -432,9 +432,13 @@ def _collections_snapshot(
     )
     embedded = _embedded_payments(documents)
     payments_available = payments_payload is not None or bool(embedded)
-    authoritative_available = receivables_available or payments_available
+    # A payment ledger is useful evidence for documentary cash flow, but it is
+    # not the same dataset as Facto's Cobranza -> Documentos impagos. It may be
+    # partial, omit credit notes or contain applications that cannot be matched
+    # safely. Only the official collections resource can be authoritative for
+    # accounts receivable.
+    authoritative_available = receivables_available
     payments = [*external_payments, *embedded]
-    paid_by_document: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     payments_by_month: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {"amount": Decimal("0"), "payments": 0}
     )
@@ -442,9 +446,6 @@ def _collections_snapshot(
         if not isinstance(payment, dict):
             continue
         amount = _payment_amount(payment)
-        document_id = _payment_document_id(payment)
-        if document_id:
-            paid_by_document[document_id] += amount
         paid_on = _payment_date(payment)
         month = paid_on.strftime("%Y-%m") if paid_on else "sin_fecha"
         payments_by_month[month]["amount"] += amount
@@ -489,27 +490,20 @@ def _collections_snapshot(
         # A condition of payment does not prove that an invoice remains unpaid.
         # Without Facto's collections balance or a complete payment ledger the
         # CRM must not convert issued invoices into accounts receivable.
-        if not authoritative_available:
+        if not receivables_available:
             continue
         document_id = _document_id(document)
-        if receivables_available:
-            reported_amount = _reported_outstanding_amount(document)
-            if reported_amount is None:
-                # A collections row without an explicit balance is not safe to
-                # interpret as unpaid.
-                continue
-            amount = reported_amount
-            paid = max(Decimal("0"), gross - amount) if gross else Decimal("0")
-        else:
-            paid = min(gross, paid_by_document.get(document_id, Decimal("0")))
-            amount = max(Decimal("0"), gross - paid)
+        reported_amount = _reported_outstanding_amount(document)
+        if reported_amount is None:
+            # A collections row without an explicit balance is not safe to
+            # interpret as unpaid.
+            continue
+        amount = reported_amount
+        paid = max(Decimal("0"), gross - amount) if gross else Decimal("0")
         if amount <= 0:
             continue
-        if receivables_available:
-            due_date = _explicit_due_date(document)
-            due_source = "facto_cobranza" if due_date else "sin_fecha"
-        else:
-            due_date, due_source = _document_due_date(document)
+        due_date = _explicit_due_date(document)
+        due_source = "facto_cobranza" if due_date else "sin_fecha"
         days_overdue = max(0, (cutoff - due_date).days) if due_date else 0
         if due_date is None:
             bucket = "Sin vencimiento"
@@ -570,11 +564,7 @@ def _collections_snapshot(
                 "due_date_source": due_source,
                 "payment_conditions": _payment_conditions(document),
                 "gross_amount": float(gross),
-                "paid_amount": (
-                    float(paid)
-                    if receivables_available or payments_available
-                    else None
-                ),
+                "paid_amount": float(paid),
                 "observed_amount": float(amount),
                 "days_overdue": days_overdue,
                 "bucket": bucket,
@@ -593,13 +583,7 @@ def _collections_snapshot(
         else "complete"
     )
     return {
-        "mode": (
-            "facto_receivables"
-            if receivables_available
-            else "registered_payments"
-            if payments_available
-            else "unavailable"
-        ),
+        "mode": "facto_receivables" if receivables_available else "unavailable",
         "authoritative": authoritative_available,
         "receivables_available": receivables_available,
         "payments_available": payments_available,
@@ -660,11 +644,10 @@ def _collections_snapshot(
         "disclaimer": (
             "Saldo pendiente informado por el recurso oficial de Cobranza de Facto."
             if receivables_available
-            else "Saldo calculado con el listado completo de pagos entregado por Facto."
-            if payments_available
             else (
-                "Facto no entrego por API la cartera de Cobranza ni un listado completo "
-                "de pagos. El CRM no muestra estimaciones de deuda."
+                "Facto no entrego por API el recurso oficial Cobranza -> Documentos "
+                "impagos. Los pagos disponibles son solo informativos y no se usan "
+                "para calcular deuda. El CRM no muestra estimaciones de cobranza."
             )
         ),
     }

@@ -148,8 +148,8 @@ class FactoClient:
 
         Facto's public reference documents POST /payments and GET
         /payments/{payment_id}, but not every account exposes a collection GET.
-        The worker feature-detects this route and falls back to documentary
-        credit exposure when it is unavailable.
+        The worker feature-detects this route for documentary cash-flow
+        evidence. It is never used to infer accounts receivable.
         """
 
         params: dict[str, Any] = {"page": max(1, page)}

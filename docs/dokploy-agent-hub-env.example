@@ -27,6 +27,9 @@ HUB_EMBEDDED_WORKER=true
 # - Account ID             -> conservar como referencia administrativa; no se usa todavia.
 FACTO_ENABLED=false
 FACTO_API_BASE_URL=https://api-billing.koywe.com/V1
+# Ruta relativa exacta que entregue soporte de Facto para:
+# Cobranza -> Documentos impagos. Sin dominio ni "/" inicial.
+# Si queda vacia, el CRM mostrara cobranza no disponible y no estimara deuda.
 FACTO_RECEIVABLES_RESOURCE=
 FACTO_CLIENT_ID=PEGAR_MANANA
 FACTO_CLIENT_SECRET=PEGAR_MANANA

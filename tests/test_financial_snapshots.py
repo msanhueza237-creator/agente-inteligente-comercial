@@ -252,7 +252,7 @@ def test_financial_snapshot_adds_net_purchases_and_supplier_ranking() -> None:
     assert comparison["months"][2]["previous_net_purchases"] == 100000
 
 
-def test_financial_snapshot_builds_exact_receivables_from_registered_payments() -> None:
+def test_financial_snapshot_does_not_use_payments_as_accounts_receivable() -> None:
     documents = [
         {
             "document_id": "INV-1",
@@ -295,14 +295,17 @@ def test_financial_snapshot_builds_exact_receivables_from_registered_payments() 
     )[0]["payload"]
     collections = report["collections"]
 
-    assert report["receivables_available"] is True
-    assert collections["mode"] == "registered_payments"
-    assert collections["observed_amount"] == 338000
-    assert collections["overdue_amount"] == 100000
-    assert collections["due_next_30"] == 238000
+    assert report["receivables_available"] is False
+    assert collections["mode"] == "unavailable"
+    assert collections["authoritative"] is False
+    assert collections["observed_amount"] == 0
+    assert collections["overdue_amount"] == 0
+    assert collections["due_next_30"] == 0
+    assert collections["documents"] == 0
     assert collections["payment_count"] == 1
     assert collections["payments_registered"] == 19000
-    assert collections["customers"][0]["name"] == "Cliente Vigente SpA"
+    assert collections["payments_available"] is True
+    assert collections["customers"] == []
 
 
 def test_financial_snapshot_does_not_invent_debt_when_collection_is_missing() -> None:

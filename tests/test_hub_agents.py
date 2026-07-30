@@ -71,6 +71,50 @@ async def test_finance_agent_uses_facto_snapshot_and_marks_missing_sources() -> 
     assert result.evidence[0]["financial_report"]["document_count"] == 2
 
 
+async def test_collections_agent_refuses_inferred_debt() -> None:
+    result = await AgentRegistry().get(AgentType.collections).execute(
+        HubTask(
+            id="task-collections-unavailable",
+            agent_type=AgentType.collections,
+            action="review_aging",
+            payload={
+                "source": "registered_payments",
+                "authoritative": True,
+                "overdue_amount": 999999,
+                "invoice_ids": ["INFERRED-1"],
+            },
+        )
+    )
+
+    assert result.metrics["overdue_amount"] == 0
+    assert result.metrics["official_receivables_available"] is False
+    assert result.proposals == []
+    assert result.warnings
+
+
+async def test_collections_agent_uses_only_official_facto_receivables() -> None:
+    result = await AgentRegistry().get(AgentType.collections).execute(
+        HubTask(
+            id="task-collections-official",
+            agent_type=AgentType.collections,
+            action="review_aging",
+            payload={
+                "source": "facto_receivables",
+                "authoritative": True,
+                "overdue_amount": 125000,
+                "invoice_ids": ["FACTO-1"],
+                "documents": [{"document_id": "FACTO-1", "observed_amount": 125000}],
+            },
+        )
+    )
+
+    assert result.metrics["overdue_amount"] == 125000
+    assert result.metrics["official_receivables_available"] is True
+    assert len(result.proposals) == 1
+    assert result.proposals[0].requires_approval is True
+    assert result.evidence[0]["source"] == "facto_receivables"
+
+
 async def test_all_six_agents_are_registered() -> None:
     assert set(AgentRegistry().names()) == {agent.value for agent in AgentType}
 
