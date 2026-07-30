@@ -60,10 +60,14 @@ async def test_facto_reads_product_and_document_details() -> None:
 
     await client.product(40)
     await client.document(100)
+    await client.payments(page=2, per_page=50)
+    await client.payment(300)
     await client.inbox_documents(page=2, per_page=50)
 
-    assert paths[-3].endswith("/products/40")
-    assert paths[-2].endswith("/documents/100")
+    assert paths[-5].endswith("/products/40")
+    assert paths[-4].endswith("/documents/100")
+    assert paths[-3].endswith("/payments")
+    assert paths[-2].endswith("/payments/300")
     assert paths[-1].endswith("/inbox_documents")
 
 

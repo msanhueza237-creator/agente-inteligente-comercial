@@ -250,3 +250,95 @@ def test_financial_snapshot_adds_net_purchases_and_supplier_ranking() -> None:
     assert comparison["purchase_growth_percent"] == 180
     assert comparison["months"][2]["current_net_purchases"] == 200000
     assert comparison["months"][2]["previous_net_purchases"] == 100000
+
+
+def test_financial_snapshot_builds_exact_receivables_from_registered_payments() -> None:
+    documents = [
+        {
+            "document_id": "INV-1",
+            "document_number": "100",
+            "document_type_id": 2,
+            "header": {
+                "issue_date": "2026-06-01",
+                "payment_conditions": "30",
+                "total_amount": 119000,
+                "receiver_legal_name": "Cliente Deudor SpA",
+                "receiver_tax_id_code": "76.500.000-1",
+            },
+        },
+        {
+            "document_id": "INV-2",
+            "document_number": "101",
+            "document_type_id": 2,
+            "header": {
+                "issue_date": "2026-07-20",
+                "payment_conditions": "30",
+                "total_amount": 238000,
+                "receiver_legal_name": "Cliente Vigente SpA",
+                "receiver_tax_id_code": "76.500.000-2",
+            },
+        },
+    ]
+    payments = [
+        {
+            "payment_id": "P-1",
+            "document_id": "INV-1",
+            "payment_date": "2026-06-20",
+            "payment_amount": 19000,
+        }
+    ]
+
+    report = extract_financial_snapshot(
+        documents,
+        generated_on=date(2026, 7, 29),
+        payments_payload=payments,
+    )[0]["payload"]
+    collections = report["collections"]
+
+    assert report["receivables_available"] is True
+    assert collections["mode"] == "registered_payments"
+    assert collections["observed_amount"] == 338000
+    assert collections["overdue_amount"] == 100000
+    assert collections["due_next_30"] == 238000
+    assert collections["payment_count"] == 1
+    assert collections["payments_registered"] == 19000
+    assert collections["customers"][0]["name"] == "Cliente Vigente SpA"
+
+
+def test_financial_snapshot_labels_credit_exposure_when_payment_list_is_missing() -> None:
+    documents = [
+        {
+            "document_id": "CREDIT-1",
+            "document_type_id": 2,
+            "header": {
+                "issue_date": "2026-07-01",
+                "payment_conditions": "0,30,60",
+                "total_amount": 119000,
+                "receiver_legal_name": "Cliente Credito",
+            },
+        },
+        {
+            "document_id": "CASH-1",
+            "document_type_id": 2,
+            "header": {
+                "issue_date": "2026-07-01",
+                "payment_conditions": "0",
+                "total_amount": 59500,
+                "receiver_legal_name": "Cliente Contado",
+            },
+        },
+    ]
+
+    report = extract_financial_snapshot(
+        documents,
+        generated_on=date(2026, 7, 29),
+    )[0]["payload"]
+    collections = report["collections"]
+
+    assert report["receivables_available"] is False
+    assert report["credit_exposure_available"] is True
+    assert collections["mode"] == "documentary_credit"
+    assert collections["observed_amount"] == 119000
+    assert collections["documents"] == 1
+    assert "No confirma" in collections["disclaimer"]
+    assert report["documentary_cash_flow"]["cash_balance_available"] is False

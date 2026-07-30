@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -89,6 +89,334 @@ def _document_type_id(document: dict[str, Any]) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _document_id(document: dict[str, Any]) -> str:
+    header = _nested_dict(document, "header", "encabezado")
+    value = _first(document, "document_id", "id") or _first(
+        header, "document_id", "id"
+    )
+    return str(value or "").strip()
+
+
+def _document_number(document: dict[str, Any]) -> str:
+    header = _nested_dict(document, "header", "encabezado")
+    value = _first(
+        document,
+        "document_number",
+        "number",
+        "folio",
+        "reference_number",
+    ) or _first(
+        header,
+        "document_number",
+        "number",
+        "folio",
+        "reference_number",
+    )
+    return str(value or "").strip()
+
+
+def _payment_conditions(document: dict[str, Any]) -> str:
+    header = _nested_dict(document, "header", "encabezado")
+    value = _first(
+        header,
+        "payment_conditions",
+        "payment_condition",
+        "payment_terms",
+        "condiciones_pago",
+    ) or _first(
+        document,
+        "payment_conditions",
+        "payment_condition",
+        "payment_terms",
+        "condiciones_pago",
+    )
+    return str(value or "").strip()
+
+
+def _explicit_due_date(document: dict[str, Any]) -> date | None:
+    header = _nested_dict(document, "header", "encabezado")
+    value = _first(
+        header,
+        "due_date",
+        "payment_due_date",
+        "expiration_date",
+        "fecha_vencimiento",
+    ) or _first(
+        document,
+        "due_date",
+        "payment_due_date",
+        "expiration_date",
+        "fecha_vencimiento",
+    )
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _document_due_date(document: dict[str, Any]) -> tuple[date | None, str]:
+    explicit = _explicit_due_date(document)
+    if explicit:
+        return explicit, "facto"
+    issued = _document_date(document)
+    conditions = _payment_conditions(document)
+    if not issued or not conditions:
+        return None, "sin_fecha"
+    days: list[int] = []
+    for part in conditions.replace(";", ",").split(","):
+        cleaned = "".join(character for character in part if character.isdigit())
+        if cleaned:
+            days.append(int(cleaned))
+    if not days:
+        return None, "sin_fecha"
+    return issued + timedelta(days=max(days)), "condicion_pago"
+
+
+def _is_credit_document(document: dict[str, Any]) -> bool:
+    conditions = _payment_conditions(document)
+    if not conditions:
+        return False
+    values = [
+        int("".join(character for character in part if character.isdigit()) or 0)
+        for part in conditions.replace(";", ",").split(",")
+    ]
+    return any(value > 0 for value in values)
+
+
+def _payment_document_id(payment: dict[str, Any]) -> str:
+    value = _first(payment, "document_id", "invoice_id", "document")
+    if isinstance(value, dict):
+        value = _first(value, "document_id", "id")
+    return str(value or "").strip()
+
+
+def _payment_date(payment: dict[str, Any]) -> date | None:
+    value = _first(payment, "payment_date", "date", "created_at", "fecha_pago")
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _payment_amount(payment: dict[str, Any]) -> Decimal:
+    return max(
+        Decimal("0"),
+        _decimal(_first(payment, "payment_amount", "amount", "monto_pago")) or Decimal("0"),
+    )
+
+
+def _embedded_payments(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for document in documents:
+        document_id = _document_id(document)
+        for key in ("payments", "payment_records", "pagos"):
+            value = document.get(key)
+            if isinstance(value, dict):
+                candidates = payload_rows(value, "data", "payments", "items")
+            elif isinstance(value, list):
+                candidates = [item for item in value if isinstance(item, dict)]
+            else:
+                continue
+            for candidate in candidates:
+                rows.append(
+                    candidate
+                    if _payment_document_id(candidate)
+                    else {**candidate, "document_id": document_id}
+                )
+    return rows
+
+
+def _collections_snapshot(
+    documents: list[dict[str, Any]],
+    *,
+    payments_payload: Any | None,
+    cutoff: date,
+) -> dict[str, Any]:
+    external_payments = (
+        payload_rows(payments_payload, "data", "payments", "items")
+        if payments_payload is not None
+        else []
+    )
+    embedded = _embedded_payments(documents)
+    payments_available = payments_payload is not None or bool(embedded)
+    payments = [*external_payments, *embedded]
+    paid_by_document: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    payments_by_month: dict[str, dict[str, Decimal | int]] = defaultdict(
+        lambda: {"amount": Decimal("0"), "payments": 0}
+    )
+    for payment in payments:
+        if not isinstance(payment, dict):
+            continue
+        amount = _payment_amount(payment)
+        document_id = _payment_document_id(payment)
+        if document_id:
+            paid_by_document[document_id] += amount
+        paid_on = _payment_date(payment)
+        month = paid_on.strftime("%Y-%m") if paid_on else "sin_fecha"
+        payments_by_month[month]["amount"] += amount
+        payments_by_month[month]["payments"] += 1
+
+    customer_rows: dict[str, dict[str, Any]] = {}
+    document_rows: list[dict[str, Any]] = []
+    aging: dict[str, dict[str, Decimal | int]] = {
+        "Al dia": {"amount": Decimal("0"), "documents": 0},
+        "1-30 dias": {"amount": Decimal("0"), "documents": 0},
+        "31-60 dias": {"amount": Decimal("0"), "documents": 0},
+        "61-90 dias": {"amount": Decimal("0"), "documents": 0},
+        "Mas de 90 dias": {"amount": Decimal("0"), "documents": 0},
+        "Sin vencimiento": {"amount": Decimal("0"), "documents": 0},
+    }
+    observed_amount = Decimal("0")
+    overdue_amount = Decimal("0")
+    due_next_30 = Decimal("0")
+
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        # Without a payment ledger, only documents explicitly issued on credit
+        # are shown. They are credit exposure, not asserted unpaid balances.
+        if not payments_available and not _is_credit_document(document):
+            continue
+        document_id = _document_id(document)
+        _, _, gross = _amounts(document)
+        paid = min(gross, paid_by_document.get(document_id, Decimal("0")))
+        amount = max(Decimal("0"), gross - paid) if payments_available else gross
+        if amount <= 0:
+            continue
+        due_date, due_source = _document_due_date(document)
+        days_overdue = max(0, (cutoff - due_date).days) if due_date else 0
+        if due_date is None:
+            bucket = "Sin vencimiento"
+        elif days_overdue <= 0:
+            bucket = "Al dia"
+            if 0 <= (due_date - cutoff).days <= 30:
+                due_next_30 += amount
+        elif days_overdue <= 30:
+            bucket = "1-30 dias"
+        elif days_overdue <= 60:
+            bucket = "31-60 dias"
+        elif days_overdue <= 90:
+            bucket = "61-90 dias"
+        else:
+            bucket = "Mas de 90 dias"
+        if days_overdue > 0:
+            overdue_amount += amount
+        observed_amount += amount
+        aging[bucket]["amount"] += amount
+        aging[bucket]["documents"] += 1
+        customer_name, customer_tax_id = _customer(document)
+        customer_key = customer_tax_id or customer_name.casefold()
+        customer = customer_rows.setdefault(
+            customer_key,
+            {
+                "name": customer_name,
+                "tax_id": customer_tax_id,
+                "amount": Decimal("0"),
+                "overdue": Decimal("0"),
+                "due_next_30": Decimal("0"),
+                "documents": 0,
+                "max_days_overdue": 0,
+                "oldest_due_date": None,
+            },
+        )
+        customer["amount"] += amount
+        customer["documents"] += 1
+        if days_overdue > 0:
+            customer["overdue"] += amount
+            customer["max_days_overdue"] = max(customer["max_days_overdue"], days_overdue)
+        elif due_date and (due_date - cutoff).days <= 30:
+            customer["due_next_30"] += amount
+        if due_date and (
+            customer["oldest_due_date"] is None
+            or due_date.isoformat() < customer["oldest_due_date"]
+        ):
+            customer["oldest_due_date"] = due_date.isoformat()
+        document_rows.append(
+            {
+                "document_id": document_id,
+                "document_number": _document_number(document),
+                "customer": customer_name,
+                "tax_id": customer_tax_id,
+                "issue_date": _document_date(document).isoformat()
+                if _document_date(document)
+                else None,
+                "due_date": due_date.isoformat() if due_date else None,
+                "due_date_source": due_source,
+                "payment_conditions": _payment_conditions(document),
+                "gross_amount": float(gross),
+                "paid_amount": float(paid) if payments_available else None,
+                "observed_amount": float(amount),
+                "days_overdue": days_overdue,
+                "bucket": bucket,
+            }
+        )
+
+    customers = sorted(
+        customer_rows.values(), key=lambda item: item["amount"], reverse=True
+    )
+    return {
+        "mode": "registered_payments" if payments_available else "documentary_credit",
+        "payments_available": payments_available,
+        "as_of": cutoff.isoformat(),
+        "observed_amount": float(observed_amount),
+        "overdue_amount": float(overdue_amount),
+        "due_next_30": float(due_next_30),
+        "documents": len(document_rows),
+        "overdue_documents": sum(
+            1 for item in document_rows if item["days_overdue"] > 0
+        ),
+        "payments_registered": float(
+            sum((_payment_amount(payment) for payment in payments), Decimal("0"))
+        ),
+        "payment_count": len(payments),
+        "aging": [
+            {
+                "bucket": bucket,
+                "amount": float(values["amount"]),
+                "documents": values["documents"],
+            }
+            for bucket, values in aging.items()
+            if values["documents"]
+        ],
+        "customers": [
+            {
+                **item,
+                "amount": float(item["amount"]),
+                "overdue": float(item["overdue"]),
+                "due_next_30": float(item["due_next_30"]),
+            }
+            for item in customers
+        ],
+        "documents_detail": sorted(
+            document_rows,
+            key=lambda item: (
+                -item["days_overdue"],
+                -(item["observed_amount"] or 0),
+            ),
+        ),
+        "payments_by_month": [
+            {
+                "month": month,
+                "amount": float(values["amount"]),
+                "payments": values["payments"],
+            }
+            for month, values in sorted(payments_by_month.items())
+        ],
+        "disclaimer": (
+            "Saldo calculado con pagos registrados que Facto entrego por API."
+            if payments_available
+            else (
+                "Exposicion documental: suma facturas emitidas con condicion de credito. "
+                "No confirma si fueron pagadas porque Facto no entrego un listado de pagos."
+            )
+        ),
+    }
 
 
 def _amounts(document: dict[str, Any]) -> tuple[Decimal, Decimal, Decimal]:
@@ -404,6 +732,7 @@ def extract_financial_snapshot(
     *,
     generated_on: date | None = None,
     purchase_documents_payload: Any | None = None,
+    payments_payload: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Create one auditable rolling financial summary from issued Facto documents.
 
@@ -522,6 +851,11 @@ def extract_financial_snapshot(
     )
     document_count = len(documents)
     comparison_cutoff = generated_on or (max(dates) if dates else date.today())
+    collections = _collections_snapshot(
+        documents,
+        payments_payload=payments_payload,
+        cutoff=comparison_cutoff,
+    )
     snapshot = {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "period_start": min(dates).isoformat() if dates else None,
@@ -584,9 +918,25 @@ def extract_financial_snapshot(
         "supplier_count": len(top_suppliers),
         "purchases_available": bool(purchase_documents),
         "top_products": products[:30],
-        "receivables_available": False,
+        "collections": collections,
+        "receivables_available": collections["payments_available"],
+        "credit_exposure_available": collections["mode"] == "documentary_credit"
+        and bool(collections["documents"]),
         "expenses_available": bool(purchase_documents),
         "cash_balance_available": False,
+        "documentary_cash_flow": {
+            "net_sales": float(net_sales),
+            "net_purchases": float(net_purchases),
+            "documentary_difference": float(net_sales - net_purchases),
+            "payments_registered": collections["payments_registered"],
+            "payment_count": collections["payment_count"],
+            "cash_balance_available": False,
+            "bank_balance_available": False,
+            "disclaimer": (
+                "Ventas menos compras es flujo documental, no saldo disponible. "
+                "Caja fisica y bancos requieren sus movimientos y saldos."
+            ),
+        },
         "source": "facto_read_only",
     }
     return [{"external_id": "rolling-sales-365", "payload": snapshot}]

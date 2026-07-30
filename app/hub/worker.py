@@ -146,6 +146,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                     if provider == "facto":
                         raw_documents: list[dict] = []
                         raw_purchase_documents: list[dict] = []
+                        raw_payments: list[dict] | None = None
                         snapshot_documents: list[dict] = []
                         snapshot_purchase_documents: list[dict] = []
                         try:
@@ -178,6 +179,22 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                                 resource="purchase_documents",
                                 records=normalize_product_records(raw_purchase_documents),
                             )
+                            try:
+                                raw_payments = await load_facto_payments(client)
+                                await crm.upsert_integration_records(
+                                    provider="facto",
+                                    resource="payments",
+                                    records=normalize_product_records(raw_payments),
+                                )
+                            except Exception:  # noqa: BLE001
+                                # The public Facto reference does not guarantee
+                                # GET /payments for every account. Finance will
+                                # expose documentary credit instead of claiming
+                                # an unpaid balance when this collection is absent.
+                                raw_payments = None
+                                logger.info(
+                                    "Facto payment collection is not available; using documentary credit exposure"
+                                )
                             snapshot_products, detailed_documents = await load_facto_details(
                                 client,
                                 raw_products,
@@ -226,6 +243,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                             snapshot_documents,
                             snapshots,
                             purchase_documents_payload=snapshot_purchase_documents,
+                            payments_payload=raw_payments,
                         )
                         await crm.upsert_integration_records(
                             provider="facto",
@@ -384,6 +402,34 @@ async def load_facto_inbox_documents(
             break
     else:
         logger.warning("Facto inbox pagination reached safety limit pages=%s", max_pages)
+    return rows
+
+
+async def load_facto_payments(
+    client: FactoClient,
+    *,
+    max_pages: int = 50,
+) -> list[dict]:
+    """Feature-detect and paginate the optional Facto payment collection."""
+
+    rows: list[dict] = []
+    fingerprints: set[str] = set()
+    for page in range(1, max_pages + 1):
+        payload = await client.payments(page=page, per_page=100)
+        page_rows = payload_rows(payload, "payments", "items")
+        if not page_rows:
+            break
+        fingerprint = hashlib.sha256(
+            json.dumps(page_rows, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        if fingerprint in fingerprints:
+            break
+        fingerprints.add(fingerprint)
+        rows.extend(page_rows)
+        if _is_explicit_last_page(payload, page) or len(page_rows) < 100:
+            break
+    else:
+        logger.warning("Facto payment pagination reached safety limit pages=%s", max_pages)
     return rows
 
 

@@ -51,9 +51,14 @@ class FinanceAgent(BusinessAgent):
         )
         warnings = []
         if not snapshot.get("receivables_available"):
-            warnings.append(
-                "Cuentas por cobrar y vencimientos aun no estan disponibles en la conexion Facto."
-            )
+            if snapshot.get("credit_exposure_available"):
+                warnings.append(
+                    "Facto permite estimar la exposicion de facturas a credito, pero no entrego el listado de pagos para confirmar la deuda real."
+                )
+            else:
+                warnings.append(
+                    "Cuentas por cobrar y vencimientos aun no estan disponibles en la conexion Facto."
+                )
         if not snapshot.get("purchases_available"):
             warnings.append(
                 "Facto aun no entrega documentos de compra para analizar proveedores."
@@ -64,6 +69,8 @@ class FinanceAgent(BusinessAgent):
             )
         purchases = Decimal(str(snapshot.get("net_purchases", 0)))
         purchase_documents = int(snapshot.get("purchase_document_count", 0))
+        collections = snapshot.get("collections", {})
+        observed_receivables = Decimal(str(collections.get("observed_amount", 0)))
         return AgentResult(
             summary=(
                 f"Facto registra ventas netas por CLP {revenue:.0f} en "
@@ -78,6 +85,15 @@ class FinanceAgent(BusinessAgent):
                     if snapshot.get("reference_margin_available")
                     else "El margen queda pendiente hasta completar costos relacionados con las ventas."
                 )
+                + (
+                    f" La cobranza observada suma CLP {observed_receivables:.0f}."
+                    if snapshot.get("receivables_available")
+                    else (
+                        f" La exposicion documental a credito suma CLP {observed_receivables:.0f}, aun sin confirmar pagos."
+                        if snapshot.get("credit_exposure_available")
+                        else ""
+                    )
+                )
             ),
             metrics={
                 "net_sales": float(revenue),
@@ -90,6 +106,8 @@ class FinanceAgent(BusinessAgent):
                 "reference_cost": float(reference_cost),
                 "reference_margin": float(reference_margin),
                 "reference_margin_percent": float(margin_pct),
+                "collections_observed": float(observed_receivables),
+                "collections_overdue": float(collections.get("overdue_amount", 0)),
             },
             evidence=[{"financial_report": snapshot}],
             warnings=warnings,

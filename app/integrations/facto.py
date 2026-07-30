@@ -143,6 +143,23 @@ class FactoClient:
     async def document(self, document_id: str | int) -> Any:
         return await self.get(f"documents/{document_id}")
 
+    async def payments(self, *, page: int = 1, per_page: int | None = None) -> Any:
+        """Try the read-only payment collection exposed by some Facto accounts.
+
+        Facto's public reference documents POST /payments and GET
+        /payments/{payment_id}, but not every account exposes a collection GET.
+        The worker feature-detects this route and falls back to documentary
+        credit exposure when it is unavailable.
+        """
+
+        params: dict[str, Any] = {"page": max(1, page)}
+        if per_page is not None:
+            params["per_page"] = max(1, min(per_page, 100))
+        return await self.get("payments", params=params)
+
+    async def payment(self, payment_id: str | int) -> Any:
+        return await self.get(f"payments/{payment_id}")
+
     async def inbox_documents(
         self,
         *,

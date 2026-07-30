@@ -4,6 +4,7 @@ from app.hub.worker import (
     load_facto_details,
     load_facto_financial_documents,
     load_facto_inbox_documents,
+    load_facto_payments,
     load_facto_sales_documents,
     load_paginated_records,
 )
@@ -479,6 +480,25 @@ async def test_load_and_merge_facto_inbox_supplier_metadata() -> None:
     assert purchases[0]["issuer_name"] == "Proveedor Industrial SpA"
     assert purchases[0]["issuer_tax_id_code"] == "76.710.537-1"
     assert purchases[0]["net_amount"] == "100000"
+
+
+async def test_load_facto_payments_paginates_optional_collection() -> None:
+    class Client:
+        async def payments(self, **kwargs):
+            assert kwargs["per_page"] == 100
+            return {
+                "payments": (
+                    [{"payment_id": 1, "payment_amount": 1000}]
+                    if kwargs["page"] == 1
+                    else []
+                ),
+                "page": kwargs["page"],
+                "page_count": 1,
+            }
+
+    payments = await load_facto_payments(Client())
+
+    assert payments == [{"payment_id": 1, "payment_amount": 1000}]
 
 
 async def test_load_paginated_records_stops_on_repeated_provider_page() -> None:
