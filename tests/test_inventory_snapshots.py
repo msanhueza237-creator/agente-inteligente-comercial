@@ -1,6 +1,7 @@
 from app.hub.inventory import eligible_replenishment_payloads, extract_product_snapshots
 from app.hub.worker import (
     load_facto_details,
+    load_facto_financial_documents,
     load_facto_sales_documents,
     load_paginated_records,
 )
@@ -368,11 +369,12 @@ async def test_load_facto_details_expands_list_rows() -> None:
     products, documents = await load_facto_details(
         Client(),
         {"products": [{"product_id": 1, "sku": "P-1"}]},
-        {"documents": [{"document_id": 2}]},
+        {"documents": [{"document_id": 2, "document_type_id": 9}]},
     )
 
     assert products[0]["inventories"]["total_available"] == 7
     assert documents[0]["details"][0]["sku"] == "P-1"
+    assert documents[0]["document_type_id"] == 9
 
 
 async def test_load_paginated_records_reads_all_pages() -> None:
@@ -407,7 +409,7 @@ async def test_load_facto_sales_documents_filters_and_paginates_since_2025() -> 
                     "page_count": 2,
                 }
             return {
-                "documents": [{"document_id": 5, "document_type_id": 28}],
+                "documents": [{"document_id": 5, "document_type_id": 32}],
                 "page": 2,
                 "page_count": 2,
             }
@@ -420,6 +422,27 @@ async def test_load_facto_sales_documents_filters_and_paginates_since_2025() -> 
     assert client.calls[0]["per_page"] == 100
     assert client.calls[0]["document_status"] == 1
     assert client.calls[0]["issue_date_from"] == "2025-01-01"
+
+
+async def test_load_facto_financial_documents_partitions_sales_and_purchases() -> None:
+    class Client:
+        async def documents(self, **kwargs):
+            return {
+                "documents": [
+                    {"document_id": 1, "document_type_id": 2},
+                    {"document_id": 2, "document_type_id": 9},
+                    {"document_id": 3, "document_type_id": 28},
+                    {"document_id": 4, "document_type_id": 32},
+                    {"document_id": 5, "document_type_id": 56},
+                ],
+                "page": 1,
+                "page_count": 1,
+            }
+
+    sales, purchases = await load_facto_financial_documents(Client())
+
+    assert [row["document_id"] for row in sales] == [1, 4]
+    assert [row["document_id"] for row in purchases] == [2, 3]
 
 
 async def test_load_paginated_records_stops_on_repeated_provider_page() -> None:

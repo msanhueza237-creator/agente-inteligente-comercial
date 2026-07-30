@@ -54,14 +54,25 @@ class FinanceAgent(BusinessAgent):
             warnings.append(
                 "Cuentas por cobrar y vencimientos aun no estan disponibles en la conexion Facto."
             )
-        if not snapshot.get("expenses_available"):
+        if not snapshot.get("purchases_available"):
             warnings.append(
-                "Gastos, bancos y flujo de caja no se incluyen hasta conectar sus fuentes contables."
+                "Facto aun no entrega documentos de compra para analizar proveedores."
             )
+        if not snapshot.get("cash_balance_available"):
+            warnings.append(
+                "Bancos y flujo de caja no se incluyen hasta conectar sus fuentes contables."
+            )
+        purchases = Decimal(str(snapshot.get("net_purchases", 0)))
+        purchase_documents = int(snapshot.get("purchase_document_count", 0))
         return AgentResult(
             summary=(
                 f"Facto registra ventas netas por CLP {revenue:.0f} en "
                 f"{int(snapshot.get('document_count', 0))} documentos. "
+                + (
+                    f"Las compras netas suman CLP {purchases:.0f} en {purchase_documents} documentos recibidos. "
+                    if snapshot.get("purchases_available")
+                    else ""
+                )
                 + (
                     f"El margen bruto referencial es CLP {reference_margin:.0f} ({margin_pct:.1f}%)."
                     if snapshot.get("reference_margin_available")
@@ -73,6 +84,8 @@ class FinanceAgent(BusinessAgent):
                 "tax": float(snapshot.get("tax", 0)),
                 "gross_sales": float(snapshot.get("gross_sales", 0)),
                 "documents": int(snapshot.get("document_count", 0)),
+                "net_purchases": float(purchases),
+                "purchase_documents": purchase_documents,
                 "average_net_ticket": float(snapshot.get("average_net_ticket", 0)),
                 "reference_cost": float(reference_cost),
                 "reference_margin": float(reference_margin),

@@ -8,6 +8,8 @@ from typing import Any
 from app.hub.inventory import payload_rows
 
 VAT_FACTOR = Decimal("1.19")
+EXEMPT_DOCUMENT_TYPE_IDS = {32, 33, 41, 42}
+PURCHASE_CREDIT_NOTE_TYPE_IDS = {28}
 MONTH_LABELS = (
     "Ene",
     "Feb",
@@ -121,7 +123,7 @@ def _amounts(document: dict[str, Any]) -> tuple[Decimal, Decimal, Decimal]:
     )
 
     # Exempt invoices have no VAT; their total is already net.
-    exempt = _document_type_id(document) == 28
+    exempt = _document_type_id(document) in EXEMPT_DOCUMENT_TYPE_IDS
     if net is None and gross is not None:
         net = gross if exempt else (gross / VAT_FACTOR)
     if gross is None and net is not None:
@@ -219,12 +221,83 @@ def _customer(document: dict[str, Any]) -> tuple[str, str]:
     return name, tax_id
 
 
+def _supplier(document: dict[str, Any]) -> tuple[str, str]:
+    """Read the issuer of a received document as the purchase supplier."""
+
+    header = _nested_dict(document, "header", "encabezado")
+    party = (
+        _nested_dict(document, "issuer", "supplier", "vendor", "provider", "emisor")
+        or _nested_dict(header, "issuer", "supplier", "vendor", "provider", "emisor")
+    )
+    candidates = (party, header, document)
+
+    def find(*keys: str) -> Any:
+        for candidate in candidates:
+            value = _first(candidate, *keys)
+            if value not in (None, ""):
+                return value
+        return None
+
+    name = str(
+        find(
+            "issuer_legal_name",
+            "issuer_business_name",
+            "issuer_name",
+            "supplier_legal_name",
+            "supplier_business_name",
+            "supplier_name",
+            "vendor_legal_name",
+            "vendor_business_name",
+            "vendor_name",
+            "provider_legal_name",
+            "provider_business_name",
+            "provider_name",
+            "emisor_razon_social",
+            "emisor_nombre",
+            "business_name",
+            "legal_name",
+            "name",
+            "razon_social",
+        )
+        or "Proveedor no identificado"
+    ).strip()
+    tax_id = str(
+        find(
+            "issuer_tax_id_code",
+            "issuer_tax_id",
+            "issuer_rut",
+            "supplier_tax_id_code",
+            "supplier_tax_id",
+            "supplier_rut",
+            "vendor_tax_id_code",
+            "vendor_tax_id",
+            "vendor_rut",
+            "provider_tax_id_code",
+            "provider_tax_id",
+            "provider_rut",
+            "emisor_rut",
+            "tax_id_code",
+            "tax_id",
+            "rut",
+            "identifier",
+        )
+        or ""
+    ).strip()
+    return name, tax_id
+
+
+def _purchase_net_amount(document: dict[str, Any]) -> Decimal:
+    net, _, _ = _amounts(document)
+    return -abs(net) if _document_type_id(document) in PURCHASE_CREDIT_NOTE_TYPE_IDS else net
+
+
 def _annual_comparison(
     dated_amounts: list[tuple[date, Decimal]],
+    dated_purchases: list[tuple[date, Decimal]] | None = None,
     *,
     generated_on: date,
 ) -> dict[str, Any]:
-    """Compare current YTD sales with the equivalent period a year earlier."""
+    """Compare current YTD sales and purchases with the same prior-year period."""
 
     current_year = generated_on.year
     previous_year = current_year - 1
@@ -239,11 +312,18 @@ def _annual_comparison(
 
     monthly_current = {month: Decimal("0") for month in range(1, 13)}
     monthly_previous = {month: Decimal("0") for month in range(1, 13)}
+    monthly_current_purchases = {month: Decimal("0") for month in range(1, 13)}
+    monthly_previous_purchases = {month: Decimal("0") for month in range(1, 13)}
     current_ytd = Decimal("0")
     previous_ytd = Decimal("0")
     previous_full_year = Decimal("0")
+    current_ytd_purchases = Decimal("0")
+    previous_ytd_purchases = Decimal("0")
+    previous_full_year_purchases = Decimal("0")
     current_documents = 0
     previous_documents = 0
+    current_purchase_documents = 0
+    previous_purchase_documents = 0
 
     for issued, net in dated_amounts:
         if issued.year == current_year:
@@ -258,10 +338,29 @@ def _annual_comparison(
                 previous_ytd += net
                 previous_documents += 1
 
+    for issued, net in dated_purchases or []:
+        if issued.year == current_year:
+            monthly_current_purchases[issued.month] += net
+            if issued <= cutoff:
+                current_ytd_purchases += net
+                current_purchase_documents += 1
+        elif issued.year == previous_year:
+            monthly_previous_purchases[issued.month] += net
+            previous_full_year_purchases += net
+            if issued <= previous_cutoff:
+                previous_ytd_purchases += net
+                previous_purchase_documents += 1
+
     growth_amount = current_ytd - previous_ytd
     growth_percent = (
         (growth_amount / previous_ytd) * Decimal("100")
         if previous_ytd
+        else None
+    )
+    purchase_growth_amount = current_ytd_purchases - previous_ytd_purchases
+    purchase_growth_percent = (
+        (purchase_growth_amount / previous_ytd_purchases) * Decimal("100")
+        if previous_ytd_purchases
         else None
     )
     return {
@@ -276,12 +375,23 @@ def _annual_comparison(
         "growth_percent": float(growth_percent) if growth_percent is not None else None,
         "current_ytd_documents": current_documents,
         "previous_ytd_documents": previous_documents,
+        "current_ytd_net_purchases": float(current_ytd_purchases),
+        "previous_ytd_net_purchases": float(previous_ytd_purchases),
+        "previous_full_year_net_purchases": float(previous_full_year_purchases),
+        "purchase_growth_amount": float(purchase_growth_amount),
+        "purchase_growth_percent": (
+            float(purchase_growth_percent) if purchase_growth_percent is not None else None
+        ),
+        "current_ytd_purchase_documents": current_purchase_documents,
+        "previous_ytd_purchase_documents": previous_purchase_documents,
         "months": [
             {
                 "month": month,
                 "label": MONTH_LABELS[month - 1],
                 "current_net_sales": float(monthly_current[month]),
                 "previous_net_sales": float(monthly_previous[month]),
+                "current_net_purchases": float(monthly_current_purchases[month]),
+                "previous_net_purchases": float(monthly_previous_purchases[month]),
             }
             for month in range(1, 13)
         ],
@@ -293,6 +403,7 @@ def extract_financial_snapshot(
     product_snapshots: list[dict[str, Any]] | None = None,
     *,
     generated_on: date | None = None,
+    purchase_documents_payload: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Create one auditable rolling financial summary from issued Facto documents.
 
@@ -301,6 +412,9 @@ def extract_financial_snapshot(
     """
 
     documents = payload_rows(documents_payload, "data", "documents", "items")
+    purchase_documents = payload_rows(
+        purchase_documents_payload, "data", "documents", "items"
+    )
     monthly: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {"net_sales": Decimal("0"), "tax": Decimal("0"), "gross_sales": Decimal("0"), "documents": 0}
     )
@@ -313,6 +427,12 @@ def extract_financial_snapshot(
     net_sales = Decimal("0")
     tax = Decimal("0")
     gross_sales = Decimal("0")
+    purchases_by_month: dict[str, dict[str, Decimal | int]] = defaultdict(
+        lambda: {"net_purchases": Decimal("0"), "documents": 0}
+    )
+    suppliers: dict[str, dict[str, Any]] = {}
+    dated_purchases: list[tuple[date, Decimal]] = []
+    net_purchases = Decimal("0")
 
     for document in documents:
         if not isinstance(document, dict):
@@ -343,6 +463,37 @@ def extract_financial_snapshot(
         customer["net_sales"] += net
         customer["documents"] += 1
 
+    for document in purchase_documents:
+        if not isinstance(document, dict):
+            continue
+        issued = _document_date(document)
+        if issued:
+            dates.append(issued)
+        net = _purchase_net_amount(document)
+        net_purchases += net
+        if issued:
+            dated_purchases.append((issued, net))
+        month = issued.strftime("%Y-%m") if issued else "sin_fecha"
+        purchases_by_month[month]["net_purchases"] += net
+        purchases_by_month[month]["documents"] += 1
+        supplier_name, supplier_tax_id = _supplier(document)
+        supplier_key = supplier_tax_id or supplier_name.casefold()
+        supplier = suppliers.setdefault(
+            supplier_key,
+            {
+                "name": supplier_name,
+                "tax_id": supplier_tax_id,
+                "net_purchases": Decimal("0"),
+                "documents": 0,
+                "years": defaultdict(lambda: {"net_purchases": Decimal("0"), "documents": 0}),
+            },
+        )
+        supplier["net_purchases"] += net
+        supplier["documents"] += 1
+        if issued:
+            supplier["years"][str(issued.year)]["net_purchases"] += net
+            supplier["years"][str(issued.year)]["documents"] += 1
+
     products: list[dict[str, Any]] = []
     reference_cost = Decimal("0")
     for item in product_snapshots or []:
@@ -366,6 +517,9 @@ def extract_financial_snapshot(
 
     products.sort(key=lambda item: item["net_sales_observed"], reverse=True)
     top_customers = sorted(customers.values(), key=lambda item: item["net_sales"], reverse=True)
+    top_suppliers = sorted(
+        suppliers.values(), key=lambda item: item["net_purchases"], reverse=True
+    )
     document_count = len(documents)
     comparison_cutoff = generated_on or (max(dates) if dates else date.today())
     snapshot = {
@@ -376,6 +530,8 @@ def extract_financial_snapshot(
         "net_sales": float(net_sales),
         "tax": float(tax),
         "gross_sales": float(gross_sales),
+        "net_purchases": float(net_purchases),
+        "purchase_document_count": len(purchase_documents),
         "average_net_ticket": float(net_sales / document_count) if document_count else 0,
         "reference_cost_of_sales": float(reference_cost),
         "reference_gross_margin": float(net_sales - reference_cost),
@@ -384,8 +540,19 @@ def extract_financial_snapshot(
             {"month": month, **{key: float(value) if isinstance(value, Decimal) else value for key, value in values.items()}}
             for month, values in sorted(monthly.items())
         ],
+        "purchases_by_month": [
+            {
+                "month": month,
+                **{
+                    key: float(value) if isinstance(value, Decimal) else value
+                    for key, value in values.items()
+                },
+            }
+            for month, values in sorted(purchases_by_month.items())
+        ],
         "year_comparison": _annual_comparison(
             dated_amounts,
+            dated_purchases,
             generated_on=comparison_cutoff,
         ),
         "document_types": [
@@ -398,9 +565,27 @@ def extract_financial_snapshot(
             {**item, "net_sales": float(item["net_sales"])} for item in top_customers
         ],
         "customer_count": len(top_customers),
+        "top_suppliers": [
+            {
+                "name": item["name"],
+                "tax_id": item["tax_id"],
+                "net_purchases": float(item["net_purchases"]),
+                "documents": item["documents"],
+                "years": {
+                    year: {
+                        "net_purchases": float(values["net_purchases"]),
+                        "documents": values["documents"],
+                    }
+                    for year, values in sorted(item["years"].items())
+                },
+            }
+            for item in top_suppliers
+        ],
+        "supplier_count": len(top_suppliers),
+        "purchases_available": bool(purchase_documents),
         "top_products": products[:30],
         "receivables_available": False,
-        "expenses_available": False,
+        "expenses_available": bool(purchase_documents),
         "cash_balance_available": False,
         "source": "facto_read_only",
     }

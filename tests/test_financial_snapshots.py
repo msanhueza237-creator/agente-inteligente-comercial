@@ -19,7 +19,7 @@ def test_financial_snapshot_separates_net_sales_and_vat() -> None:
             },
             {
                 "document_id": 2,
-                "document_type_id": 28,
+                "document_type_id": 32,
                 "header": {
                     "issue_date": "2026-07-05",
                     "total_amount": 50000,
@@ -98,7 +98,7 @@ def test_financial_snapshot_keeps_full_customer_ranking() -> None:
     documents = [
         {
             "document_id": customer,
-            "document_type_id": 28,
+            "document_type_id": 32,
             "issue_date": "2026-07-20",
             "total_amount": customer * 1000,
             "receiver_legal_name": f"Cliente {customer}",
@@ -116,27 +116,27 @@ def test_financial_snapshot_keeps_full_customer_ranking() -> None:
 def test_financial_snapshot_compares_ytd_with_same_prior_year_period() -> None:
     documents = [
         {
-            "document_type_id": 28,
+            "document_type_id": 32,
             "issue_date": "2025-01-10",
             "total_amount": 100000,
         },
         {
-            "document_type_id": 28,
+            "document_type_id": 32,
             "issue_date": "2025-07-15",
             "total_amount": 200000,
         },
         {
-            "document_type_id": 28,
+            "document_type_id": 32,
             "issue_date": "2025-12-10",
             "total_amount": 400000,
         },
         {
-            "document_type_id": 28,
+            "document_type_id": 32,
             "issue_date": "2026-01-12",
             "total_amount": 150000,
         },
         {
-            "document_type_id": 28,
+            "document_type_id": 32,
             "issue_date": "2026-07-15",
             "total_amount": 300000,
         },
@@ -163,6 +163,8 @@ def test_financial_snapshot_compares_ytd_with_same_prior_year_period() -> None:
         "label": "Ene",
         "current_net_sales": 150000,
         "previous_net_sales": 100000,
+        "current_net_purchases": 0,
+        "previous_net_purchases": 0,
     }
 
 
@@ -170,12 +172,12 @@ def test_financial_snapshot_uses_latest_synchronized_document_as_cutoff() -> Non
     report = extract_financial_snapshot(
         [
             {
-                "document_type_id": 28,
+                "document_type_id": 32,
                 "issue_date": "2025-07-29",
                 "total_amount": 100000,
             },
             {
-                "document_type_id": 28,
+                "document_type_id": 32,
                 "issue_date": "2026-07-29",
                 "total_amount": 200000,
             },
@@ -185,3 +187,66 @@ def test_financial_snapshot_uses_latest_synchronized_document_as_cutoff() -> Non
     assert report["period_end"] == "2026-07-29"
     assert report["year_comparison"]["cutoff_date"] == "2026-07-29"
     assert report["year_comparison"]["previous_cutoff_date"] == "2025-07-29"
+
+
+def test_financial_snapshot_adds_net_purchases_and_supplier_ranking() -> None:
+    purchases = [
+        {
+            "document_id": 101,
+            "document_type_id": 9,
+            "issue_date": "2025-03-10",
+            "net_amount": 100000,
+            "tax_amount": 19000,
+            "total_amount": 119000,
+            "issuer_legal_name": "Proveedor China Uno",
+            "issuer_tax_id_code": "EXT-001",
+        },
+        {
+            "document_id": 102,
+            "document_type_id": 9,
+            "issue_date": "2026-03-10",
+            "net_amount": 250000,
+            "tax_amount": 47500,
+            "total_amount": 297500,
+            "issuer_legal_name": "Proveedor China Uno",
+            "issuer_tax_id_code": "EXT-001",
+        },
+        {
+            "document_id": 103,
+            "document_type_id": 28,
+            "issue_date": "2026-03-20",
+            "net_amount": 50000,
+            "tax_amount": 9500,
+            "total_amount": 59500,
+            "issuer_legal_name": "Proveedor China Uno",
+            "issuer_tax_id_code": "EXT-001",
+        },
+        {
+            "document_id": 104,
+            "document_type_id": 33,
+            "issue_date": "2026-05-02",
+            "total_amount": 80000,
+            "issuer_legal_name": "Proveedor Local Dos",
+            "issuer_tax_id_code": "76.111.222-3",
+        },
+    ]
+
+    report = extract_financial_snapshot(
+        [],
+        generated_on=date(2026, 7, 29),
+        purchase_documents_payload=purchases,
+    )[0]["payload"]
+
+    assert report["net_purchases"] == 380000
+    assert report["purchase_document_count"] == 4
+    assert report["supplier_count"] == 2
+    assert report["purchases_available"] is True
+    assert report["top_suppliers"][0]["name"] == "Proveedor China Uno"
+    assert report["top_suppliers"][0]["net_purchases"] == 300000
+    assert report["top_suppliers"][0]["years"]["2026"]["net_purchases"] == 200000
+    comparison = report["year_comparison"]
+    assert comparison["current_ytd_net_purchases"] == 280000
+    assert comparison["previous_ytd_net_purchases"] == 100000
+    assert comparison["purchase_growth_percent"] == 180
+    assert comparison["months"][2]["current_net_purchases"] == 200000
+    assert comparison["months"][2]["previous_net_purchases"] == 100000

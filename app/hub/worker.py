@@ -21,6 +21,12 @@ logger = logging.getLogger("clima_activa.hub")
 # 30-minute monitor only requests new documents after the first full sync.
 _facto_document_detail_cache: dict[str, dict] = {}
 
+# Facto Chile: emitted sales documents and received purchase documents.
+# Dispatch guides and customs DIN records are excluded from financial totals
+# because they do not represent a net sale or purchase by themselves.
+FACTO_SALES_DOCUMENT_TYPE_IDS = {2, 32, 37, 39, 41, 46}
+FACTO_PURCHASE_DOCUMENT_TYPE_IDS = {9, 15, 28, 30, 33, 34, 38, 40, 42}
+
 
 class AgentHubWorker:
     def __init__(self, crm: HubCRMPort, registry: AgentRegistry) -> None:
@@ -138,32 +144,52 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                     # read only and are used only to calculate an auditable
                     # sales-rate snapshot for the foreign-trade agent.
                     if provider == "facto":
-                        raw_documents = {}
-                        snapshot_documents = raw_documents
+                        raw_documents: list[dict] = []
+                        raw_purchase_documents: list[dict] = []
+                        snapshot_documents: list[dict] = []
+                        snapshot_purchase_documents: list[dict] = []
                         try:
-                            raw_documents = await load_facto_sales_documents(client)
+                            raw_documents, raw_purchase_documents = (
+                                await load_facto_financial_documents(client)
+                            )
                             snapshot_documents = raw_documents
+                            snapshot_purchase_documents = raw_purchase_documents
                             await crm.upsert_integration_records(
                                 provider="facto",
                                 resource="documents",
                                 records=normalize_product_records(raw_documents),
                             )
-                            snapshot_products, snapshot_documents = await load_facto_details(
+                            await crm.upsert_integration_records(
+                                provider="facto",
+                                resource="purchase_documents",
+                                records=normalize_product_records(raw_purchase_documents),
+                            )
+                            snapshot_products, detailed_documents = await load_facto_details(
                                 client,
                                 raw_products,
-                                raw_documents,
+                                [*raw_documents, *raw_purchase_documents],
                             )
+                            snapshot_documents = [
+                                row for row in detailed_documents if _is_facto_sales_document(row)
+                            ]
+                            snapshot_purchase_documents = [
+                                row for row in detailed_documents if _is_facto_purchase_document(row)
+                            ]
                             detail_product_records = normalize_product_records(snapshot_products)
                             await crm.upsert_integration_records(
                                 provider="facto",
                                 resource="product_details",
                                 records=detail_product_records,
                             )
-                            document_records = normalize_product_records(snapshot_documents)
                             await crm.upsert_integration_records(
                                 provider="facto",
                                 resource="document_details",
-                                records=document_records,
+                                records=normalize_product_records(snapshot_documents),
+                            )
+                            await crm.upsert_integration_records(
+                                provider="facto",
+                                resource="purchase_document_details",
+                                records=normalize_product_records(snapshot_purchase_documents),
                             )
                         except Exception:  # noqa: BLE001
                             # Product synchronization remains healthy when a
@@ -185,6 +211,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                         financial_snapshots = extract_financial_snapshot(
                             snapshot_documents,
                             snapshots,
+                            purchase_documents_payload=snapshot_purchase_documents,
                         )
                         await crm.upsert_integration_records(
                             provider="facto",
@@ -220,7 +247,7 @@ async def load_facto_details(
             except Exception:  # noqa: BLE001
                 logger.warning("Facto product detail unavailable id=%s", product_id)
                 return row
-        return detail if isinstance(detail, dict) else row
+        return {**row, **detail} if isinstance(detail, dict) else row
 
     async def document_detail(row: dict) -> dict:
         document_id = row.get("document_id") or row.get("id")
@@ -228,14 +255,14 @@ async def load_facto_details(
             return row
         cache_key = str(document_id)
         if cache_key in _facto_document_detail_cache:
-            return _facto_document_detail_cache[cache_key]
+            return {**row, **_facto_document_detail_cache[cache_key]}
         async with semaphore:
             try:
                 detail = await client.document(document_id)
             except Exception:  # noqa: BLE001
                 logger.warning("Facto document detail unavailable id=%s", document_id)
                 return row
-        result = detail if isinstance(detail, dict) else row
+        result = {**row, **detail} if isinstance(detail, dict) else row
         if isinstance(result, dict):
             _facto_document_detail_cache[cache_key] = result
         return result
@@ -266,24 +293,29 @@ def _facto_document_type_id(row: dict) -> int | None:
 def _is_facto_sales_document(row: dict) -> bool:
     """Keep emitted invoices/receipts and exclude credits and dispatch guides."""
 
-    # IDs verified against the connected Facto document-type catalog:
-    # 2 invoice, 28 exempt invoice and 37 electronic receipt.
-    return _facto_document_type_id(row) in {2, 28, 37}
+    return _facto_document_type_id(row) in FACTO_SALES_DOCUMENT_TYPE_IDS
 
 
-async def load_facto_sales_documents(
+def _is_facto_purchase_document(row: dict) -> bool:
+    """Keep received purchases, including received credit and debit notes."""
+
+    return _facto_document_type_id(row) in FACTO_PURCHASE_DOCUMENT_TYPE_IDS
+
+
+async def load_facto_financial_documents(
     client: FactoClient,
     *,
     history_start: date | None = None,
     max_pages: int = 20,
-) -> list[dict]:
-    """Load issued Facto sales documents from the auditable finance baseline."""
+) -> tuple[list[dict], list[dict]]:
+    """Load and partition Facto documents into issued sales and purchases."""
 
     end = date.today()
     # The finance dashboard compares the current year with all of 2025.
     # Keep this baseline explicit so it does not silently move every day.
     start = history_start or date(2025, 1, 1)
-    collected: list[dict] = []
+    sales: list[dict] = []
+    purchases: list[dict] = []
     for page in range(1, max_pages + 1):
         payload = await client.documents(
             page=page,
@@ -294,12 +326,29 @@ async def load_facto_sales_documents(
             document_status=1,
         )
         rows = payload_rows(payload, "documents", "items")
-        collected.extend(row for row in rows if _is_facto_sales_document(row))
+        sales.extend(row for row in rows if _is_facto_sales_document(row))
+        purchases.extend(row for row in rows if _is_facto_purchase_document(row))
         if not rows or _is_explicit_last_page(payload, page):
             break
     else:
-        logger.warning("Facto sales pagination reached safety limit pages=%s", max_pages)
-    return collected
+        logger.warning("Facto finance pagination reached safety limit pages=%s", max_pages)
+    return sales, purchases
+
+
+async def load_facto_sales_documents(
+    client: FactoClient,
+    *,
+    history_start: date | None = None,
+    max_pages: int = 20,
+) -> list[dict]:
+    """Load issued Facto sales documents from the auditable finance baseline."""
+
+    sales, _ = await load_facto_financial_documents(
+        client,
+        history_start=history_start,
+        max_pages=max_pages,
+    )
+    return sales
 
 
 async def load_paginated_records(

@@ -67,7 +67,7 @@ async def test_finance_agent_uses_facto_snapshot_and_marks_missing_sources() -> 
 
     assert result.metrics["net_sales"] == 150000
     assert result.metrics["reference_margin"] == 90000
-    assert len(result.warnings) == 2
+    assert len(result.warnings) == 3
     assert result.evidence[0]["financial_report"]["document_count"] == 2
 
 
