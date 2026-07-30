@@ -143,6 +143,19 @@ class FactoClient:
     async def document(self, document_id: str | int) -> Any:
         return await self.get(f"documents/{document_id}")
 
+    async def inbox_documents(
+        self,
+        *,
+        page: int = 1,
+        per_page: int | None = None,
+    ) -> Any:
+        """Read received-document metadata, including the supplier identity."""
+
+        params: dict[str, Any] = {"page": max(1, page)}
+        if per_page is not None:
+            params["per_page"] = max(1, min(per_page, 100))
+        return await self.get("inbox_documents", params=params)
+
     async def health(self) -> FactoHealth:
         if not self.configured:
             return FactoHealth(False, False, "Credenciales pendientes en Dokploy")

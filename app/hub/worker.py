@@ -152,6 +152,20 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                             raw_documents, raw_purchase_documents = (
                                 await load_facto_financial_documents(client)
                             )
+                            try:
+                                inbox_documents = await load_facto_inbox_documents(client)
+                                raw_purchase_documents = enrich_facto_purchase_documents(
+                                    raw_purchase_documents,
+                                    inbox_documents,
+                                )
+                            except Exception:  # noqa: BLE001
+                                # /inbox_documents enriches the supplier name,
+                                # but purchase totals and RUTs remain usable if
+                                # an older Facto installation lacks this route.
+                                logger.warning(
+                                    "Facto inbox metadata is not available for supplier names",
+                                    exc_info=True,
+                                )
                             snapshot_documents = raw_documents
                             snapshot_purchase_documents = raw_purchase_documents
                             await crm.upsert_integration_records(
@@ -333,6 +347,79 @@ async def load_facto_financial_documents(
     else:
         logger.warning("Facto finance pagination reached safety limit pages=%s", max_pages)
     return sales, purchases
+
+
+async def load_facto_inbox_documents(
+    client: FactoClient,
+    *,
+    max_pages: int = 50,
+) -> list[dict]:
+    """Load received-document metadata used to identify purchase suppliers."""
+
+    rows: list[dict] = []
+    fingerprints: set[str] = set()
+    expected_page_size: int | None = None
+    for page in range(1, max_pages + 1):
+        payload = await client.inbox_documents(page=page, per_page=100)
+        page_rows = payload_rows(
+            payload,
+            "inbox_documents",
+            "documents",
+            "items",
+        )
+        if not page_rows:
+            break
+        fingerprint = hashlib.sha256(
+            json.dumps(page_rows, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        if fingerprint in fingerprints:
+            break
+        fingerprints.add(fingerprint)
+        rows.extend(page_rows)
+        if expected_page_size is None:
+            expected_page_size = len(page_rows)
+        if _is_explicit_last_page(payload, page):
+            break
+        if expected_page_size and len(page_rows) < expected_page_size:
+            break
+    else:
+        logger.warning("Facto inbox pagination reached safety limit pages=%s", max_pages)
+    return rows
+
+
+def enrich_facto_purchase_documents(
+    purchase_documents: list[dict],
+    inbox_documents: list[dict],
+) -> list[dict]:
+    """Attach issuer name/RUT from Facto's received-document inbox."""
+
+    by_document_id = {
+        str(row.get("document_id")): row
+        for row in inbox_documents
+        if row.get("document_id") not in (None, "")
+    }
+    enriched: list[dict] = []
+    for purchase in purchase_documents:
+        match = by_document_id.get(str(purchase.get("document_id")))
+        if not match:
+            enriched.append(purchase)
+            continue
+        supplier_metadata = {
+            key: match.get(key)
+            for key in (
+                "issuer_name",
+                "issuer_tax_id_code",
+                "issuer_tax_id_type",
+                "sender_email",
+                "purchase_order",
+                "receive_date",
+                "product_receipt_date",
+                "product_receipt_location",
+            )
+            if match.get(key) not in (None, "")
+        }
+        enriched.append({**purchase, **supplier_metadata})
+    return enriched
 
 
 async def load_facto_sales_documents(

@@ -1,7 +1,9 @@
 from app.hub.inventory import eligible_replenishment_payloads, extract_product_snapshots
 from app.hub.worker import (
+    enrich_facto_purchase_documents,
     load_facto_details,
     load_facto_financial_documents,
+    load_facto_inbox_documents,
     load_facto_sales_documents,
     load_paginated_records,
 )
@@ -443,6 +445,40 @@ async def test_load_facto_financial_documents_partitions_sales_and_purchases() -
 
     assert [row["document_id"] for row in sales] == [1, 4]
     assert [row["document_id"] for row in purchases] == [2, 3]
+
+
+async def test_load_and_merge_facto_inbox_supplier_metadata() -> None:
+    class Client:
+        async def inbox_documents(self, **kwargs):
+            assert kwargs["per_page"] == 100
+            return {
+                "inbox_documents": [
+                    {
+                        "inbox_document_id": 90,
+                        "document_id": 2,
+                        "issuer_name": "Proveedor Industrial SpA",
+                        "issuer_tax_id_code": "76.710.537-1",
+                    }
+                ],
+                "page": 1,
+                "page_count": 1,
+            }
+
+    inbox = await load_facto_inbox_documents(Client())
+    purchases = enrich_facto_purchase_documents(
+        [
+            {
+                "document_id": 2,
+                "document_type_id": 9,
+                "net_amount": "100000",
+            }
+        ],
+        inbox,
+    )
+
+    assert purchases[0]["issuer_name"] == "Proveedor Industrial SpA"
+    assert purchases[0]["issuer_tax_id_code"] == "76.710.537-1"
+    assert purchases[0]["net_amount"] == "100000"
 
 
 async def test_load_paginated_records_stops_on_repeated_provider_page() -> None:
