@@ -160,6 +160,29 @@ class FactoClient:
     async def payment(self, payment_id: str | int) -> Any:
         return await self.get(f"payments/{payment_id}")
 
+    async def receivables(
+        self,
+        *,
+        page: int = 1,
+        per_page: int | None = None,
+    ) -> Any:
+        """Read the account-specific Facto collections resource.
+
+        Facto's public Billing OpenAPI does not publish a list endpoint for
+        Cobranza. Some accounts can receive an additional read-only resource
+        from Facto support; its relative path is configured in Dokploy.
+        """
+
+        resource = self.settings.facto_receivables_resource.strip()
+        if not resource:
+            raise FactoError(
+                "Facto no tiene configurado el recurso oficial de cobranza"
+            )
+        params: dict[str, Any] = {"page": max(1, page)}
+        if per_page is not None:
+            params["per_page"] = max(1, min(per_page, 100))
+        return await self.get(resource, params=params)
+
     async def inbox_documents(
         self,
         *,

@@ -129,6 +129,8 @@ def _payment_conditions(document: dict[str, Any]) -> str:
                 "payment_information",
                 "financial",
                 "credit",
+                "collection",
+                "receivable",
             )
             if isinstance((value := document.get(key)), dict)
         ],
@@ -180,6 +182,8 @@ def _explicit_due_date(document: dict[str, Any]) -> date | None:
                 "payment_information",
                 "financial",
                 "credit",
+                "collection",
+                "receivable",
             )
             if isinstance((value := document.get(key)), dict)
         ],
@@ -276,6 +280,110 @@ def _payment_amount(payment: dict[str, Any]) -> Decimal:
     )
 
 
+def _reported_outstanding_amount(document: dict[str, Any]) -> Decimal | None:
+    """Read only a balance explicitly reported by Facto's collections source."""
+
+    containers = [
+        *[
+            value
+            for key in (
+                "collection",
+                "receivable",
+                "payment",
+                "payment_info",
+                "payment_information",
+                "financial",
+                "totals",
+                "amounts",
+            )
+            if isinstance((value := document.get(key)), dict)
+        ],
+        document,
+    ]
+    for container in containers:
+        value = _first(
+            container,
+            "pending_balance",
+            "pending_amount",
+            "outstanding_balance",
+            "outstanding_amount",
+            "balance_due",
+            "amount_due",
+            "receivable_balance",
+            "receivable_amount",
+            "remaining_balance",
+            "remaining_amount",
+            "open_balance",
+            "open_amount",
+            "saldo_pendiente",
+            "monto_pendiente",
+            "saldo_por_cobrar",
+            "monto_por_cobrar",
+            "saldo_actual",
+            "saldo",
+        )
+        parsed = _decimal(value)
+        if parsed is not None:
+            return max(Decimal("0"), parsed)
+    return None
+
+
+def _merge_receivable_rows(
+    receivables: list[dict[str, Any]],
+    documents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Complete collection rows with their invoice metadata without altering balances."""
+
+    by_id = {
+        document_id: document
+        for document in documents
+        if (document_id := _document_id(document))
+    }
+    by_number = {
+        document_number: document
+        for document in documents
+        if (document_number := _document_number(document))
+    }
+    nested_keys = (
+        "header",
+        "encabezado",
+        "customer",
+        "client",
+        "receiver",
+        "recipient",
+        "receptor",
+        "collection",
+        "receivable",
+        "totals",
+        "total",
+        "amounts",
+        "montos",
+    )
+    merged_rows: list[dict[str, Any]] = []
+    for receivable in receivables:
+        base = by_id.get(_document_id(receivable)) or by_number.get(
+            _document_number(receivable)
+        )
+        if not base:
+            merged_rows.append(receivable)
+            continue
+        merged = {**base, **receivable}
+        for key in nested_keys:
+            base_value = base.get(key)
+            receivable_value = receivable.get(key)
+            if isinstance(base_value, dict) or isinstance(receivable_value, dict):
+                merged[key] = {
+                    **(base_value if isinstance(base_value, dict) else {}),
+                    **(
+                        receivable_value
+                        if isinstance(receivable_value, dict)
+                        else {}
+                    ),
+                }
+        merged_rows.append(merged)
+    return merged_rows
+
+
 def _embedded_payments(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for document in documents:
@@ -301,8 +409,22 @@ def _collections_snapshot(
     documents: list[dict[str, Any]],
     *,
     payments_payload: Any | None,
+    receivables_payload: Any | None,
     cutoff: date,
 ) -> dict[str, Any]:
+    receivable_rows = (
+        payload_rows(
+            receivables_payload,
+            "receivables",
+            "unpaid_documents",
+            "accounts_receivable",
+            "documents",
+            "items",
+        )
+        if receivables_payload is not None
+        else []
+    )
+    receivables_available = receivables_payload is not None
     external_payments = (
         payload_rows(payments_payload, "data", "payments", "items")
         if payments_payload is not None
@@ -310,6 +432,7 @@ def _collections_snapshot(
     )
     embedded = _embedded_payments(documents)
     payments_available = payments_payload is not None or bool(embedded)
+    authoritative_available = receivables_available or payments_available
     payments = [*external_payments, *embedded]
     paid_by_document: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     payments_by_month: dict[str, dict[str, Decimal | int]] = defaultdict(
@@ -349,7 +472,12 @@ def _collections_snapshot(
         "unknown": Decimal("0"),
     }
 
-    for document in documents:
+    source_documents = (
+        _merge_receivable_rows(receivable_rows, documents)
+        if receivables_available
+        else documents
+    )
+    for document in source_documents:
         if not isinstance(document, dict):
             continue
         _, _, gross = _amounts(document)
@@ -358,16 +486,30 @@ def _collections_snapshot(
         reviewed_amount += gross
         classification_documents[classification] += 1
         classification_amounts[classification] += gross
-        # Without a payment ledger, only documents explicitly issued on credit
-        # are shown. They are credit exposure, not asserted unpaid balances.
-        if not payments_available and classification != "credit":
+        # A condition of payment does not prove that an invoice remains unpaid.
+        # Without Facto's collections balance or a complete payment ledger the
+        # CRM must not convert issued invoices into accounts receivable.
+        if not authoritative_available:
             continue
         document_id = _document_id(document)
-        paid = min(gross, paid_by_document.get(document_id, Decimal("0")))
-        amount = max(Decimal("0"), gross - paid) if payments_available else gross
+        if receivables_available:
+            reported_amount = _reported_outstanding_amount(document)
+            if reported_amount is None:
+                # A collections row without an explicit balance is not safe to
+                # interpret as unpaid.
+                continue
+            amount = reported_amount
+            paid = max(Decimal("0"), gross - amount) if gross else Decimal("0")
+        else:
+            paid = min(gross, paid_by_document.get(document_id, Decimal("0")))
+            amount = max(Decimal("0"), gross - paid)
         if amount <= 0:
             continue
-        due_date, due_source = _document_due_date(document)
+        if receivables_available:
+            due_date = _explicit_due_date(document)
+            due_source = "facto_cobranza" if due_date else "sin_fecha"
+        else:
+            due_date, due_source = _document_due_date(document)
         days_overdue = max(0, (cutoff - due_date).days) if due_date else 0
         if due_date is None:
             bucket = "Sin vencimiento"
@@ -428,7 +570,11 @@ def _collections_snapshot(
                 "due_date_source": due_source,
                 "payment_conditions": _payment_conditions(document),
                 "gross_amount": float(gross),
-                "paid_amount": float(paid) if payments_available else None,
+                "paid_amount": (
+                    float(paid)
+                    if receivables_available or payments_available
+                    else None
+                ),
                 "observed_amount": float(amount),
                 "days_overdue": days_overdue,
                 "bucket": bucket,
@@ -447,7 +593,15 @@ def _collections_snapshot(
         else "complete"
     )
     return {
-        "mode": "registered_payments" if payments_available else "documentary_credit",
+        "mode": (
+            "facto_receivables"
+            if receivables_available
+            else "registered_payments"
+            if payments_available
+            else "unavailable"
+        ),
+        "authoritative": authoritative_available,
+        "receivables_available": receivables_available,
         "payments_available": payments_available,
         "as_of": cutoff.isoformat(),
         "reviewed_documents": reviewed_documents,
@@ -504,11 +658,13 @@ def _collections_snapshot(
             for month, values in sorted(payments_by_month.items())
         ],
         "disclaimer": (
-            "Saldo calculado con pagos registrados que Facto entrego por API."
+            "Saldo pendiente informado por el recurso oficial de Cobranza de Facto."
+            if receivables_available
+            else "Saldo calculado con el listado completo de pagos entregado por Facto."
             if payments_available
             else (
-                "Exposicion documental: suma facturas emitidas con condicion de credito. "
-                "No confirma si fueron pagadas porque Facto no entrego un listado de pagos."
+                "Facto no entrego por API la cartera de Cobranza ni un listado completo "
+                "de pagos. El CRM no muestra estimaciones de deuda."
             )
         ),
     }
@@ -828,6 +984,7 @@ def extract_financial_snapshot(
     generated_on: date | None = None,
     purchase_documents_payload: Any | None = None,
     payments_payload: Any | None = None,
+    receivables_payload: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Create one auditable rolling financial summary from issued Facto documents.
 
@@ -949,6 +1106,7 @@ def extract_financial_snapshot(
     collections = _collections_snapshot(
         documents,
         payments_payload=payments_payload,
+        receivables_payload=receivables_payload,
         cutoff=comparison_cutoff,
     )
     snapshot = {
@@ -1014,9 +1172,8 @@ def extract_financial_snapshot(
         "purchases_available": bool(purchase_documents),
         "top_products": products[:30],
         "collections": collections,
-        "receivables_available": collections["payments_available"],
-        "credit_exposure_available": collections["mode"] == "documentary_credit"
-        and bool(collections["documents"]),
+        "receivables_available": collections["authoritative"],
+        "credit_exposure_available": False,
         "expenses_available": bool(purchase_documents),
         "cash_balance_available": False,
         "documentary_cash_flow": {

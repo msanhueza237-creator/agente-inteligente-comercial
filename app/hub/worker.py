@@ -147,6 +147,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                         raw_documents: list[dict] = []
                         raw_purchase_documents: list[dict] = []
                         raw_payments: list[dict] | None = None
+                        raw_receivables: list[dict] | None = None
                         snapshot_documents: list[dict] = []
                         snapshot_purchase_documents: list[dict] = []
                         try:
@@ -208,8 +209,22 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                                 # an unpaid balance when this collection is absent.
                                 raw_payments = None
                                 logger.info(
-                                    "Facto payment collection is not available; using documentary credit exposure"
+                                    "Facto payment collection is not available"
                                 )
+                            if settings.facto_receivables_resource.strip():
+                                try:
+                                    raw_receivables = await load_facto_receivables(client)
+                                    await crm.upsert_integration_records(
+                                        provider="facto",
+                                        resource="receivables",
+                                        records=normalize_product_records(raw_receivables),
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    raw_receivables = None
+                                    logger.warning(
+                                        "Configured Facto receivables resource is not available",
+                                        exc_info=True,
+                                    )
                             snapshot_products, detailed_documents = await load_facto_details(
                                 client,
                                 raw_products,
@@ -265,6 +280,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                             snapshots,
                             purchase_documents_payload=snapshot_purchase_documents,
                             payments_payload=raw_payments,
+                            receivables_payload=raw_receivables,
                         )
                         await crm.upsert_integration_records(
                             provider="facto",
@@ -510,6 +526,41 @@ async def load_facto_payments(
             break
     else:
         logger.warning("Facto payment pagination reached safety limit pages=%s", max_pages)
+    return rows
+
+
+async def load_facto_receivables(
+    client: FactoClient,
+    *,
+    max_pages: int = 50,
+) -> list[dict]:
+    """Paginate the read-only collections resource enabled by Facto support."""
+
+    rows: list[dict] = []
+    fingerprints: set[str] = set()
+    for page in range(1, max_pages + 1):
+        payload = await client.receivables(page=page, per_page=100)
+        page_rows = payload_rows(
+            payload,
+            "receivables",
+            "unpaid_documents",
+            "accounts_receivable",
+            "documents",
+            "items",
+        )
+        if not page_rows:
+            break
+        fingerprint = hashlib.sha256(
+            json.dumps(page_rows, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        if fingerprint in fingerprints:
+            break
+        fingerprints.add(fingerprint)
+        rows.extend(page_rows)
+        if _is_explicit_last_page(payload, page) or len(page_rows) < 100:
+            break
+    else:
+        logger.warning("Facto receivables pagination reached safety limit pages=%s", max_pages)
     return rows
 
 

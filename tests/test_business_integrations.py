@@ -54,6 +54,7 @@ async def test_facto_reads_product_and_document_details() -> None:
             facto_client_secret=SecretStr("secret"),
             facto_username=SecretStr("user"),
             facto_password=SecretStr("password"),
+            facto_receivables_resource="receivables",
         ),
         transport=httpx.MockTransport(handler),
     )
@@ -63,12 +64,14 @@ async def test_facto_reads_product_and_document_details() -> None:
     await client.payments(page=2, per_page=50)
     await client.payment(300)
     await client.inbox_documents(page=2, per_page=50)
+    await client.receivables(page=2, per_page=50)
 
-    assert paths[-5].endswith("/products/40")
-    assert paths[-4].endswith("/documents/100")
-    assert paths[-3].endswith("/payments")
-    assert paths[-2].endswith("/payments/300")
-    assert paths[-1].endswith("/inbox_documents")
+    assert paths[-6].endswith("/products/40")
+    assert paths[-5].endswith("/documents/100")
+    assert paths[-4].endswith("/payments")
+    assert paths[-3].endswith("/payments/300")
+    assert paths[-2].endswith("/inbox_documents")
+    assert paths[-1].endswith("/receivables")
 
 
 async def test_tiendanube_uses_bearer_header_and_store_path() -> None:

@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     facto_client_secret: SecretStr | None = None
     facto_username: SecretStr | None = None
     facto_password: SecretStr | None = None
+    # Facto's public Billing API does not currently document a collection
+    # endpoint for Cobranza -> Documentos impagos.  Keep the account-specific
+    # read-only resource configurable so support can enable it without a code
+    # change. Example value (only when supplied by Facto): receivables
+    facto_receivables_resource: str = ""
     facto_sync_interval_minutes: int = 30
     facto_request_timeout_seconds: float = 30.0
     facto_read_only: bool = True
@@ -112,6 +117,15 @@ class Settings(BaseSettings):
                 raise ValueError("Facto credentials are required when FACTO_ENABLED=true")
             if not self.facto_api_base_url.startswith("https://"):
                 raise ValueError("FACTO_API_BASE_URL must use HTTPS")
+            receivables_resource = self.facto_receivables_resource.strip()
+            if (
+                "://" in receivables_resource
+                or ".." in receivables_resource
+                or receivables_resource.startswith("/")
+            ):
+                raise ValueError(
+                    "FACTO_RECEIVABLES_RESOURCE must be a relative API resource"
+                )
         if self.tiendanube_enabled:
             if not self.tiendanube_store_id or not self.tiendanube_store_id.strip():
                 raise ValueError("TIENDANUBE_STORE_ID is required when TIENDANUBE_ENABLED=true")
