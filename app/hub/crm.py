@@ -14,6 +14,7 @@ class HubCRMError(RuntimeError):
 
 
 INTEGRATION_RECORD_BATCH_SIZE = 25
+INTEGRATION_RECORD_MAX_PAYLOAD_BYTES = 64 * 1024
 
 
 class HubCRMPort:
@@ -170,13 +171,36 @@ class HubCRMPort:
     ) -> None:
         if not records:
             return
-        for offset in range(0, len(records), INTEGRATION_RECORD_BATCH_SIZE):
+        batches: list[list[dict]] = []
+        current_batch: list[dict] = []
+        current_size = 0
+        for record in records:
+            record_size = len(
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            exceeds_count = len(current_batch) >= INTEGRATION_RECORD_BATCH_SIZE
+            exceeds_size = (
+                current_batch
+                and current_size + record_size > INTEGRATION_RECORD_MAX_PAYLOAD_BYTES
+            )
+            if exceeds_count or exceeds_size:
+                batches.append(current_batch)
+                current_batch = []
+                current_size = 0
+            current_batch.append(record)
+            current_size += record_size
+        if current_batch:
+            batches.append(current_batch)
+
+        for batch_index, batch in enumerate(batches):
             payload = {
                 "provider": provider,
                 "resource": resource,
-                "records": records[
-                    offset : offset + INTEGRATION_RECORD_BATCH_SIZE
-                ],
+                "records": batch,
             }
             await self._request(
                 "POST",
@@ -184,7 +208,7 @@ class HubCRMPort:
                 payload=payload,
                 idempotency_key=self._stable_key(
                     provider,
-                    f"{resource}:{offset // INTEGRATION_RECORD_BATCH_SIZE}",
+                    f"{resource}:{batch_index}",
                     payload,
                 ),
             )
