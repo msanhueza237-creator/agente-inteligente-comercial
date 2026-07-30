@@ -595,6 +595,7 @@ def extract_commercial_snapshot(
 def build_commercial_report(
     commercial_snapshot: list[dict[str, Any]],
     crm_companies: list[dict[str, Any]],
+    financial_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Enrich the provider portfolio with reviewed CRM classifications."""
 
@@ -948,6 +949,90 @@ def build_commercial_report(
         )[:30]
     ]
 
+    def ranking_row(row: dict[str, Any], *, source: str) -> dict[str, Any]:
+        return {
+            "customer_key": row.get("customer_key"),
+            "crm_company_id": row.get("crm_company_id"),
+            "name": row.get("name") or row.get("legal_name"),
+            "legal_name": row.get("legal_name"),
+            "tax_id": row.get("tax_id"),
+            "email": row.get("email"),
+            "phone": row.get("phone"),
+            "whatsapp": row.get("whatsapp"),
+            "region": row.get("region"),
+            "city": row.get("city"),
+            "sources": row.get("sources", []),
+            "source_channel": row.get("source_channel"),
+            "lifecycle": row.get("lifecycle"),
+            "last_purchase_at": row.get("last_purchase_at"),
+            "commercial_score": row.get("commercial_score"),
+            "value_tier": row.get("value_tier"),
+            "recommended_action": row.get("recommended_action"),
+            "opportunity_priority": row.get("opportunity_priority"),
+            "documents": int(row.get("facto_documents", 0))
+            if source == "facto"
+            else int(row.get("tiendanube_orders", 0)),
+            "gross_sales": float(row.get("tiendanube_gross_sales", 0))
+            if source == "tiendanube"
+            else 0.0,
+            "net_sales": float(row.get("facto_net_sales", 0))
+            if source == "facto"
+            else float(
+                Decimal(str(row.get("tiendanube_gross_sales", 0)))
+                / Decimal("1.19")
+            ),
+        }
+
+    facto_ranking = [
+        ranking_row(row, source="facto")
+        for row in sorted(
+            (row for row in customers if "facto" in row.get("sources", [])),
+            key=lambda item: (
+                Decimal(str(item.get("facto_net_sales", 0))),
+                int(item.get("facto_documents", 0)),
+            ),
+            reverse=True,
+        )
+    ]
+    tiendanube_ranking = [
+        ranking_row(row, source="tiendanube")
+        for row in sorted(
+            (row for row in customers if "tiendanube" in row.get("sources", [])),
+            key=lambda item: (
+                Decimal(str(item.get("tiendanube_gross_sales", 0))),
+                int(item.get("tiendanube_orders", 0)),
+            ),
+            reverse=True,
+        )
+    ]
+
+    sales_products = []
+    if isinstance(financial_snapshot, dict):
+        sales_products = [
+            {
+                "name": item.get("name"),
+                "sku": item.get("sku"),
+                "units": float(item.get("units", 0) or 0),
+                "net_sales": float(item.get("net_sales_observed", 0) or 0),
+            }
+            for item in financial_snapshot.get("top_products", [])
+            if isinstance(item, dict)
+        ]
+    if not sales_products:
+        observed_products: defaultdict[str, Decimal] = defaultdict(Decimal)
+        for row in customers:
+            for item in row.get("top_products", []):
+                if isinstance(item, dict) and _text(item.get("name")):
+                    observed_products[_text(item["name"])] += _decimal(item.get("units"))
+        sales_products = [
+            {"name": name, "sku": "", "units": float(units), "net_sales": 0.0}
+            for name, units in sorted(
+                observed_products.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        ]
+
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "customers": sorted(
@@ -994,6 +1079,9 @@ def build_commercial_report(
         "segments": segments,
         "opportunity_counts": dict(opportunity_counts),
         "top_opportunities": top_opportunities,
+        "facto_ranking": facto_ranking,
+        "tiendanube_ranking": tiendanube_ranking,
+        "sales_products": sales_products,
         "methodology": (
             "Unión automática sólo por RUT, email o teléfono exactos. "
             "Facto es la fuente de venta neta; Tiendanube identifica el canal web "

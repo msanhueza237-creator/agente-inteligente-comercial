@@ -205,3 +205,65 @@ def test_commercial_report_prioritizes_web_and_high_value_recovery() -> None:
     assert "valuable_customers_to_rescue" in segment_ids
     assert "web_customers_to_develop" in segment_ids
     assert report["acquisition_by_month"][-1]["returning_customers"] == 1
+
+
+def test_commercial_report_owns_channel_rankings_and_sold_products() -> None:
+    report = build_commercial_report(
+        [
+            {
+                "customer_key": "rut:760000001",
+                "name": "Cliente Facto",
+                "tax_id": "760000001",
+                "email": "facto@cliente.cl",
+                "sources": ["facto"],
+                "source_channel": "facto_only",
+                "facto_net_sales": 900_000,
+                "facto_documents": 4,
+                "tiendanube_gross_sales": 0,
+                "tiendanube_orders": 0,
+                "first_purchase_at": "2025-01-01",
+                "last_purchase_at": "2026-07-01",
+                "lifecycle": "active",
+                "contactable": True,
+                "source_ids": {},
+            },
+            {
+                "customer_key": "email:web@cliente.cl",
+                "name": "Cliente Web",
+                "email": "web@cliente.cl",
+                "sources": ["tiendanube"],
+                "source_channel": "tiendanube_only",
+                "facto_net_sales": 0,
+                "facto_documents": 0,
+                "tiendanube_gross_sales": 238_000,
+                "tiendanube_orders": 2,
+                "first_purchase_at": "2026-06-01",
+                "last_purchase_at": "2026-07-01",
+                "lifecycle": "active",
+                "contactable": True,
+                "source_ids": {},
+            },
+        ],
+        [],
+        {
+            "top_products": [
+                {
+                    "name": "Bomba de condensado",
+                    "sku": "BC-01",
+                    "units": 12,
+                    "net_sales_observed": 480_000,
+                }
+            ]
+        },
+    )
+
+    assert report["facto_ranking"][0]["name"] == "Cliente Facto"
+    assert report["facto_ranking"][0]["net_sales"] == 900_000
+    assert report["tiendanube_ranking"][0]["name"] == "Cliente Web"
+    assert report["tiendanube_ranking"][0]["net_sales"] == 200_000
+    assert report["sales_products"][0] == {
+        "name": "Bomba de condensado",
+        "sku": "BC-01",
+        "units": 12.0,
+        "net_sales": 480_000.0,
+    }

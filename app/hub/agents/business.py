@@ -26,7 +26,12 @@ class CommercialAgent(BusinessAgent):
                 ],
             )
 
-        report = build_commercial_report(snapshot, companies)
+        financial_snapshot = task.payload.get("financial_snapshot")
+        report = build_commercial_report(
+            snapshot,
+            companies,
+            financial_snapshot if isinstance(financial_snapshot, dict) else None,
+        )
         metrics = report["metrics"]
         proposals = [
             ActionProposal(
