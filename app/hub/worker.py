@@ -8,7 +8,7 @@ from datetime import date
 
 from app.config import get_settings
 from app.hub.agents import AgentRegistry
-from app.hub.crm import HubCRMPort
+from app.hub.crm import HubCRMError, HubCRMPort
 from app.hub.finance import extract_financial_snapshot
 from app.hub.inventory import extract_product_snapshots, payload_rows
 from app.integrations.facto import FactoClient
@@ -174,18 +174,33 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                                 resource="documents",
                                 records=normalize_product_records(raw_documents),
                             )
-                            await crm.upsert_integration_records(
-                                provider="facto",
-                                resource="purchase_documents",
-                                records=normalize_product_records(raw_purchase_documents),
-                            )
                             try:
-                                raw_payments = await load_facto_payments(client)
                                 await crm.upsert_integration_records(
                                     provider="facto",
-                                    resource="payments",
-                                    records=normalize_product_records(raw_payments),
+                                    resource="purchase_documents",
+                                    records=normalize_product_records(raw_purchase_documents),
                                 )
+                            except HubCRMError:
+                                # Purchase documents enrich the audit trail, but
+                                # an older CRM endpoint must not prevent Facto
+                                # detail loading or the financial snapshot.
+                                logger.warning(
+                                    "CRM does not accept Facto purchase document records yet",
+                                    exc_info=True,
+                                )
+                            try:
+                                raw_payments = await load_facto_payments(client)
+                                try:
+                                    await crm.upsert_integration_records(
+                                        provider="facto",
+                                        resource="payments",
+                                        records=normalize_product_records(raw_payments),
+                                    )
+                                except HubCRMError:
+                                    logger.warning(
+                                        "CRM does not accept Facto payment records yet",
+                                        exc_info=True,
+                                    )
                             except Exception:  # noqa: BLE001
                                 # The public Facto reference does not guarantee
                                 # GET /payments for every account. Finance will
@@ -217,11 +232,17 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                                 resource="document_details",
                                 records=normalize_product_records(snapshot_documents),
                             )
-                            await crm.upsert_integration_records(
-                                provider="facto",
-                                resource="purchase_document_details",
-                                records=normalize_product_records(snapshot_purchase_documents),
-                            )
+                            try:
+                                await crm.upsert_integration_records(
+                                    provider="facto",
+                                    resource="purchase_document_details",
+                                    records=normalize_product_records(snapshot_purchase_documents),
+                                )
+                            except HubCRMError:
+                                logger.warning(
+                                    "CRM does not accept Facto purchase detail records yet",
+                                    exc_info=True,
+                                )
                         except Exception:  # noqa: BLE001
                             # Product synchronization remains healthy when a
                             # Facto account does not expose sales documents.
