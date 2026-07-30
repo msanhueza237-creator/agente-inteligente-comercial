@@ -6,19 +6,63 @@ from typing import Any
 
 from app.foreign_trade.planning import ForeignTradePlanner, InventoryPosition
 from app.hub.agents.base import BusinessAgent
+from app.hub.commercial import build_commercial_report
 from app.hub.contracts import ActionProposal, AgentResult, HubTask, ProposalKind
 
 
 class CommercialAgent(BusinessAgent):
     async def execute(self, task: HubTask) -> AgentResult:
-        overdue = int(task.payload.get("overdue_follow_ups", 0))
-        proposal = ActionProposal(
-            kind=ProposalKind.commercial_follow_up,
-            title="Seguimientos comerciales para revisar",
-            summary=f"Se detectaron {overdue} seguimientos vencidos.",
-            payload={"company_ids": task.payload.get("company_ids", [])},
+        snapshot = [
+            row for row in task.payload.get("commercial_snapshot", []) if isinstance(row, dict)
+        ]
+        companies = [
+            row for row in task.payload.get("crm_companies", []) if isinstance(row, dict)
+        ]
+        if not snapshot and not companies:
+            return AgentResult(
+                summary="Aun no existe una cartera sincronizada para analizar.",
+                warnings=[
+                    "Espera la siguiente sincronizacion de Facto y Tiendanube, luego vuelve a solicitar el analisis."
+                ],
+            )
+
+        report = build_commercial_report(snapshot, companies)
+        metrics = report["metrics"]
+        proposals = [
+            ActionProposal(
+                kind=ProposalKind.campaign_draft,
+                title=f"Segmento para revisar: {segment['name']}",
+                summary=(
+                    f"{segment['count']} clientes cumplen reglas trazables. "
+                    "La campana se mantiene como borrador y no enviara mensajes automaticamente."
+                ),
+                payload={
+                    "source_agent": "commercial",
+                    "segment_id": segment["id"],
+                    "segment_name": segment["name"],
+                    "reason": segment["reason"],
+                    "channel": segment["channel"],
+                    "customer_keys": segment["customer_keys"],
+                    "company_ids": segment["company_ids"],
+                },
+                risk_level="medium",
+            )
+            for segment in report["segments"]
+        ]
+        return AgentResult(
+            summary=(
+                f"Cartera unificada: {metrics['customers']} clientes, "
+                f"{metrics['contactable']} con canal de contacto y "
+                f"{metrics['tiendanube_customers']} vinculados a Climactiva.cl. "
+                f"Se prepararon {len(proposals)} segmentos para revision humana."
+            ),
+            metrics=metrics,
+            proposals=proposals,
+            evidence=[{"commercial_report": report}],
+            warnings=[
+                "Los ingresos de Tiendanube no se suman a Facto para evitar doble contabilizacion."
+            ],
         )
-        return AgentResult(summary=proposal.summary, metrics={"overdue": overdue}, proposals=[proposal])
 
 
 class MarketingAgent(BusinessAgent):

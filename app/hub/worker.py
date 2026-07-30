@@ -8,6 +8,7 @@ from datetime import date
 
 from app.config import get_settings
 from app.hub.agents import AgentRegistry
+from app.hub.commercial import extract_commercial_snapshot
 from app.hub.crm import HubCRMError, HubCRMPort
 from app.hub.finance import extract_financial_snapshot
 from app.hub.inventory import extract_product_snapshots, payload_rows
@@ -108,6 +109,12 @@ async def run_hub_services(crm: HubCRMPort) -> None:
 async def integration_monitor(crm: HubCRMPort) -> None:
     settings = get_settings()
     while True:
+        facto_customers: list[dict] = []
+        facto_sales_documents: list[dict] = []
+        tiendanube_customers: list[dict] = []
+        tiendanube_orders: list[dict] = []
+        facto_commercial_ready = not settings.facto_enabled
+        tiendanube_commercial_ready = not settings.tiendanube_enabled
         for provider, client, enabled in (
             ("facto", FactoClient(settings), settings.facto_enabled),
             ("tiendanube", TiendanubeClient(settings), settings.tiendanube_enabled),
@@ -131,7 +138,10 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                     raw_products = (
                         await load_paginated_records(client.products, row_keys=("products", "items"))
                         if provider == "facto"
-                        else await client.products(page=1)
+                        else await load_paginated_records(
+                            client.products,
+                            row_keys=("products", "items", "data"),
+                        )
                     )
                     snapshot_products = raw_products
                     records = normalize_product_records(raw_products)
@@ -144,6 +154,22 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                     # read only and are used only to calculate an auditable
                     # sales-rate snapshot for the foreign-trade agent.
                     if provider == "facto":
+                        try:
+                            facto_customers = await load_paginated_records(
+                                client.customers,
+                                row_keys=("clients", "customers", "data", "items"),
+                            )
+                            await crm.upsert_integration_records(
+                                provider="facto",
+                                resource="customers",
+                                records=normalize_product_records(facto_customers),
+                            )
+                            facto_commercial_ready = True
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "Facto customers are not available for commercial analysis",
+                                exc_info=True,
+                            )
                         raw_documents: list[dict] = []
                         raw_purchase_documents: list[dict] = []
                         raw_payments: list[dict] | None = None
@@ -154,6 +180,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                             raw_documents, raw_purchase_documents = (
                                 await load_facto_financial_documents(client)
                             )
+                            facto_sales_documents = raw_documents
                             try:
                                 inbox_documents = await load_facto_inbox_documents(client)
                                 raw_purchase_documents = enrich_facto_purchase_documents(
@@ -233,6 +260,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                             snapshot_documents = [
                                 row for row in detailed_documents if _is_facto_sales_document(row)
                             ]
+                            facto_sales_documents = snapshot_documents
                             snapshot_purchase_documents = [
                                 row for row in detailed_documents if _is_facto_purchase_document(row)
                             ]
@@ -287,8 +315,67 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                             resource="financial_snapshots",
                             records=financial_snapshots,
                         )
+                    else:
+                        try:
+                            tiendanube_customers = await load_paginated_records(
+                                client.customers,
+                                row_keys=("customers", "data", "items"),
+                            )
+                            tiendanube_orders = await load_paginated_records(
+                                client.orders,
+                                row_keys=("orders", "data", "items"),
+                            )
+                            await crm.upsert_integration_records(
+                                provider="tiendanube",
+                                resource="customers",
+                                records=normalize_product_records(tiendanube_customers),
+                            )
+                            await crm.upsert_integration_records(
+                                provider="tiendanube",
+                                resource="orders",
+                                records=normalize_product_records(tiendanube_orders),
+                            )
+                            tiendanube_commercial_ready = True
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "Tiendanube customers or orders are not available for commercial analysis",
+                                exc_info=True,
+                            )
             except Exception:  # noqa: BLE001
                 logger.exception("integration status failed provider=%s", provider)
+        if facto_commercial_ready and tiendanube_commercial_ready:
+            commercial_customers = extract_commercial_snapshot(
+                facto_customers,
+                facto_sales_documents,
+                tiendanube_customers,
+                tiendanube_orders,
+            )
+            try:
+                await crm.upsert_integration_records(
+                    provider="facto",
+                    resource="commercial_snapshots",
+                    records=[
+                        {
+                            "external_id": "unified_customer_portfolio",
+                            "position": 0,
+                            "payload": {
+                                "generated_at": date.today().isoformat(),
+                                "customers": commercial_customers,
+                                "sources": {
+                                    "facto_customers": len(facto_customers),
+                                    "facto_documents": len(facto_sales_documents),
+                                    "tiendanube_customers": len(tiendanube_customers),
+                                    "tiendanube_orders": len(tiendanube_orders),
+                                },
+                            },
+                        }
+                    ],
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "CRM does not accept unified commercial snapshots yet",
+                    exc_info=True,
+                )
         await asyncio.sleep(min(
             settings.facto_sync_interval_minutes,
             settings.tiendanube_sync_interval_minutes,
@@ -699,6 +786,10 @@ def normalize_product_records(payload) -> list[dict]:
             row.get("id")
             or row.get("product_id")
             or row.get("document_id")
+            or row.get("order_id")
+            or row.get("client_id")
+            or row.get("customer_id")
+            or row.get("customer_key")
             or row.get("sku")
             or row.get("code")
         )
