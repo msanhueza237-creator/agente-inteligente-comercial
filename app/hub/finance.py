@@ -137,9 +137,37 @@ def _customer(document: dict[str, Any]) -> tuple[str, str]:
         _nested_dict(document, "customer", "client", "receiver", "recipient", "receptor")
         or _nested_dict(header, "customer", "client", "receiver", "recipient", "receptor")
     )
+    candidates = (party, header, document)
+
+    def find(*keys: str) -> Any:
+        for candidate in candidates:
+            value = _first(candidate, *keys)
+            if value not in (None, ""):
+                return value
+        return None
+
+    # Facto expone al receptor tanto como objeto anidado como mediante campos
+    # planos receiver_* en el encabezado, según la versión del documento.
     name = str(
-        _first(
-            party,
+        find(
+            "receiver_legal_name",
+            "receiver_business_name",
+            "receiver_name",
+            "receiverLegalName",
+            "receiverBusinessName",
+            "receiverName",
+            "recipient_legal_name",
+            "recipient_business_name",
+            "recipient_name",
+            "customer_legal_name",
+            "customer_business_name",
+            "customer_name",
+            "client_legal_name",
+            "client_business_name",
+            "client_name",
+            "receptor_razon_social",
+            "receptor_nombre",
+            "razon_social_receptor",
             "business_name",
             "legal_name",
             "name",
@@ -148,7 +176,32 @@ def _customer(document: dict[str, Any]) -> tuple[str, str]:
         )
         or "Cliente no identificado"
     ).strip()
-    tax_id = str(_first(party, "tax_id", "rut", "document_number", "identifier") or "").strip()
+    tax_id = str(
+        find(
+            "receiver_tax_id_code",
+            "receiver_tax_id",
+            "receiver_rut",
+            "receiverTaxIdCode",
+            "receiverTaxId",
+            "recipient_tax_id_code",
+            "recipient_tax_id",
+            "recipient_rut",
+            "customer_tax_id_code",
+            "customer_tax_id",
+            "customer_rut",
+            "client_tax_id_code",
+            "client_tax_id",
+            "client_rut",
+            "receptor_rut",
+            "rut_receptor",
+            "tax_id_code",
+            "tax_id",
+            "rut",
+            "document_number",
+            "identifier",
+        )
+        or ""
+    ).strip()
     return name, tax_id
 
 
@@ -246,9 +299,12 @@ def extract_financial_snapshot(
             {"document_type_id": key, **{name: float(value) if isinstance(value, Decimal) else value for name, value in values.items()}}
             for key, values in document_types.items()
         ],
+        # El CRM necesita la cartera completa para buscar por RUT o razón social.
+        # El nombre se conserva por compatibilidad con snapshots ya publicados.
         "top_customers": [
-            {**item, "net_sales": float(item["net_sales"])} for item in top_customers[:30]
+            {**item, "net_sales": float(item["net_sales"])} for item in top_customers
         ],
+        "customer_count": len(top_customers),
         "top_products": products[:30],
         "receivables_available": False,
         "expenses_available": False,
