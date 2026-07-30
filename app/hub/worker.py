@@ -269,8 +269,65 @@ async def load_facto_details(
 
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
+    def record_id(row: dict, *, kind: str) -> object | None:
+        """Read IDs from Facto list rows, including their ``header`` envelope."""
+
+        id_keys = (
+            ("document_id", "id")
+            if kind == "document"
+            else ("product_id", "id")
+        )
+        current: object = row
+        for _ in range(4):
+            if not isinstance(current, dict):
+                return None
+            for key in id_keys:
+                value = current.get(key)
+                if value not in (None, ""):
+                    return value
+            next_value = next(
+                (
+                    current.get(key)
+                    for key in ("header", "data", kind, "item", "result")
+                    if isinstance(current.get(key), dict)
+                ),
+                None,
+            )
+            if next_value is None:
+                return None
+            current = next_value
+        return None
+
+    def unwrap_detail(payload: object, *, kind: str) -> dict | None:
+        """Remove singular response envelopes without discarding record fields."""
+
+        current = payload
+        for _ in range(4):
+            if not isinstance(current, dict):
+                return None
+            next_value = next(
+                (
+                    current.get(key)
+                    for key in ("data", kind, "item", "result")
+                    if isinstance(current.get(key), dict)
+                ),
+                None,
+            )
+            if next_value is None:
+                return current
+            current = next_value
+        return current if isinstance(current, dict) else None
+
+    def merge_detail(row: dict, detail: dict) -> dict:
+        merged = {**row, **detail}
+        row_header = row.get("header")
+        detail_header = detail.get("header")
+        if isinstance(row_header, dict) and isinstance(detail_header, dict):
+            merged["header"] = {**row_header, **detail_header}
+        return merged
+
     async def product_detail(row: dict) -> dict:
-        product_id = row.get("product_id") or row.get("id")
+        product_id = record_id(row, kind="product")
         if product_id is None:
             return row
         async with semaphore:
@@ -279,25 +336,27 @@ async def load_facto_details(
             except Exception:  # noqa: BLE001
                 logger.warning("Facto product detail unavailable id=%s", product_id)
                 return row
-        return {**row, **detail} if isinstance(detail, dict) else row
+        detail_record = unwrap_detail(detail, kind="product")
+        return merge_detail(row, detail_record) if detail_record else row
 
     async def document_detail(row: dict) -> dict:
-        document_id = row.get("document_id") or row.get("id")
+        document_id = record_id(row, kind="document")
         if document_id is None:
             return row
         cache_key = str(document_id)
         if cache_key in _facto_document_detail_cache:
-            return {**row, **_facto_document_detail_cache[cache_key]}
+            return merge_detail(row, _facto_document_detail_cache[cache_key])
         async with semaphore:
             try:
                 detail = await client.document(document_id)
             except Exception:  # noqa: BLE001
                 logger.warning("Facto document detail unavailable id=%s", document_id)
                 return row
-        result = {**row, **detail} if isinstance(detail, dict) else row
-        if isinstance(result, dict):
-            _facto_document_detail_cache[cache_key] = result
-        return result
+        detail_record = unwrap_detail(detail, kind="document")
+        if not detail_record:
+            return row
+        _facto_document_detail_cache[cache_key] = detail_record
+        return merge_detail(row, detail_record)
 
     product_rows = payload_rows(products_payload, "data", "products", "items")
     document_rows = payload_rows(documents_payload, "data", "documents", "items")

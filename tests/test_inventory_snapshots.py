@@ -380,6 +380,55 @@ async def test_load_facto_details_expands_list_rows() -> None:
     assert documents[0]["document_type_id"] == 9
 
 
+async def test_load_facto_details_reads_nested_document_id_and_envelope() -> None:
+    requested_document_ids: list[int] = []
+
+    class Client:
+        async def product(self, product_id):
+            return {"product_id": product_id}
+
+        async def document(self, document_id):
+            requested_document_ids.append(document_id)
+            return {
+                "data": {
+                    "document": {
+                        "header": {
+                            "issue_date": "2026-07-01",
+                            "payment_conditions": "30",
+                        },
+                        "details": [
+                            {
+                                "sku": "P-1",
+                                "quantity": 2,
+                                "unit_price": 1000,
+                            }
+                        ],
+                    }
+                }
+            }
+
+    _, documents = await load_facto_details(
+        Client(),
+        [],
+        {
+            "documents": [
+                {
+                    "header": {
+                        "document_id": 22,
+                        "document_type_id": 32,
+                    }
+                }
+            ]
+        },
+    )
+
+    assert requested_document_ids == [22]
+    assert documents[0]["header"]["document_id"] == 22
+    assert documents[0]["header"]["document_type_id"] == 32
+    assert documents[0]["header"]["payment_conditions"] == "30"
+    assert documents[0]["details"][0]["sku"] == "P-1"
+
+
 async def test_load_paginated_records_reads_all_pages() -> None:
     async def loader(*, page: int):
         pages = {

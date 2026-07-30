@@ -226,7 +226,16 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
         document_date = _document_date(document)
         if document_date:
             document_dates.append(document_date)
-        document_id = str(_first(document, "document_id", "id") or "")
+        header = document.get("header")
+        document_id = str(
+            _first(document, "document_id", "id")
+            or (
+                _first(header, "document_id", "id")
+                if isinstance(header, dict)
+                else ""
+            )
+            or ""
+        )
         for line in _line_rows(document):
             sku = _first(
                 line,
