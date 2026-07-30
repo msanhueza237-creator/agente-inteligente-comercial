@@ -340,5 +340,77 @@ def test_financial_snapshot_labels_credit_exposure_when_payment_list_is_missing(
     assert collections["mode"] == "documentary_credit"
     assert collections["observed_amount"] == 119000
     assert collections["documents"] == 1
+    assert collections["reviewed_documents"] == 2
+    assert collections["credit_documents"] == 1
+    assert collections["cash_documents"] == 1
+    assert collections["cash_amount"] == 59500
+    assert collections["unclassified_documents"] == 0
+    assert collections["classification_status"] == "complete"
     assert "No confirma" in collections["disclaimer"]
     assert report["documentary_cash_flow"]["cash_balance_available"] is False
+
+
+def test_financial_snapshot_reports_invoices_without_payment_classification() -> None:
+    documents = [
+        {
+            "document_id": "UNKNOWN-1",
+            "document_type_id": 2,
+            "header": {
+                "issue_date": "2026-07-01",
+                "total_amount": 119000,
+                "receiver_legal_name": "Cliente sin condicion",
+            },
+        },
+        {
+            "document_id": "CASH-1",
+            "document_type_id": 2,
+            "header": {
+                "issue_date": "2026-07-02",
+                "payment_conditions": "Contado",
+                "total_amount": 59500,
+                "receiver_legal_name": "Cliente contado",
+            },
+        },
+    ]
+
+    report = extract_financial_snapshot(
+        documents,
+        generated_on=date(2026, 7, 29),
+    )[0]["payload"]
+    collections = report["collections"]
+
+    assert collections["observed_amount"] == 0
+    assert collections["reviewed_documents"] == 2
+    assert collections["reviewed_amount"] == 178500
+    assert collections["cash_documents"] == 1
+    assert collections["cash_amount"] == 59500
+    assert collections["unclassified_documents"] == 1
+    assert collections["unclassified_amount"] == 119000
+    assert collections["classification_status"] == "partial"
+
+
+def test_financial_snapshot_recognizes_nested_due_date_as_credit() -> None:
+    documents = [
+        {
+            "document_id": "NESTED-1",
+            "document_type_id": 2,
+            "header": {
+                "issue_date": "2026-07-01",
+                "total_amount": 119000,
+                "receiver_legal_name": "Cliente con vencimiento",
+            },
+            "payment_information": {
+                "due_date": "2026-08-15",
+            },
+        }
+    ]
+
+    report = extract_financial_snapshot(
+        documents,
+        generated_on=date(2026, 7, 29),
+    )[0]["payload"]
+    collections = report["collections"]
+
+    assert collections["observed_amount"] == 119000
+    assert collections["credit_documents"] == 1
+    assert collections["due_next_30"] == 119000

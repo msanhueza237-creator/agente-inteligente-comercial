@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -118,38 +119,85 @@ def _document_number(document: dict[str, Any]) -> str:
 
 
 def _payment_conditions(document: dict[str, Any]) -> str:
-    header = _nested_dict(document, "header", "encabezado")
-    value = _first(
-        header,
-        "payment_conditions",
-        "payment_condition",
-        "payment_terms",
-        "condiciones_pago",
-    ) or _first(
+    containers = [
+        _nested_dict(document, "header", "encabezado"),
+        *[
+            value
+            for key in (
+                "payment",
+                "payment_info",
+                "payment_information",
+                "financial",
+                "credit",
+            )
+            if isinstance((value := document.get(key)), dict)
+        ],
         document,
-        "payment_conditions",
-        "payment_condition",
-        "payment_terms",
-        "condiciones_pago",
-    )
-    return str(value or "").strip()
+    ]
+    for container in containers:
+        value = _first(
+            container,
+            "payment_conditions",
+            "payment_condition",
+            "payment_terms",
+            "payment_term",
+            "condiciones_pago",
+            "condicion_pago",
+            "forma_pago",
+        )
+        if isinstance(value, dict):
+            value = _first(
+                value,
+                "value",
+                "code",
+                "days",
+                "description",
+                "name",
+            )
+        if isinstance(value, list):
+            values = [
+                str(
+                    _first(item, "value", "code", "days", "description", "name")
+                    if isinstance(item, dict)
+                    else item
+                ).strip()
+                for item in value
+            ]
+            value = ",".join(item for item in values if item)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
 
 
 def _explicit_due_date(document: dict[str, Any]) -> date | None:
-    header = _nested_dict(document, "header", "encabezado")
-    value = _first(
-        header,
-        "due_date",
-        "payment_due_date",
-        "expiration_date",
-        "fecha_vencimiento",
-    ) or _first(
+    containers = [
+        _nested_dict(document, "header", "encabezado"),
+        *[
+            value
+            for key in (
+                "payment",
+                "payment_info",
+                "payment_information",
+                "financial",
+                "credit",
+            )
+            if isinstance((value := document.get(key)), dict)
+        ],
         document,
-        "due_date",
-        "payment_due_date",
-        "expiration_date",
-        "fecha_vencimiento",
-    )
+    ]
+    value = None
+    for container in containers:
+        value = _first(
+            container,
+            "due_date",
+            "payment_due_date",
+            "expiration_date",
+            "expiry_date",
+            "fecha_vencimiento",
+            "fecha_pago",
+        )
+        if value:
+            break
     if not value:
         return None
     try:
@@ -166,25 +214,42 @@ def _document_due_date(document: dict[str, Any]) -> tuple[date | None, str]:
     conditions = _payment_conditions(document)
     if not issued or not conditions:
         return None, "sin_fecha"
-    days: list[int] = []
-    for part in conditions.replace(";", ",").split(","):
-        cleaned = "".join(character for character in part if character.isdigit())
-        if cleaned:
-            days.append(int(cleaned))
+    days = [int(value) for value in re.findall(r"\d+", conditions)]
     if not days:
         return None, "sin_fecha"
     return issued + timedelta(days=max(days)), "condicion_pago"
 
 
-def _is_credit_document(document: dict[str, Any]) -> bool:
+def _payment_classification(document: dict[str, Any]) -> str:
+    """Classify Facto's declared payment terms without inventing receivables."""
+
     conditions = _payment_conditions(document)
-    if not conditions:
-        return False
-    values = [
-        int("".join(character for character in part if character.isdigit()) or 0)
-        for part in conditions.replace(";", ",").split(",")
-    ]
-    return any(value > 0 for value in values)
+    normalized = conditions.casefold()
+    values = [int(value) for value in re.findall(r"\d+", normalized)]
+    if any(value > 0 for value in values):
+        return "credit"
+    if any(
+        marker in normalized
+        for marker in ("credito", "crédito", "credit", "cuotas", "plazo")
+    ):
+        return "credit"
+    if values and all(value == 0 for value in values):
+        return "cash"
+    if any(
+        marker in normalized
+        for marker in ("contado", "cash", "inmediato", "immediate")
+    ):
+        return "cash"
+
+    issued = _document_date(document)
+    due = _explicit_due_date(document)
+    if issued and due:
+        return "credit" if due > issued else "cash"
+    return "unknown"
+
+
+def _is_credit_document(document: dict[str, Any]) -> bool:
+    return _payment_classification(document) == "credit"
 
 
 def _payment_document_id(payment: dict[str, Any]) -> str:
@@ -275,16 +340,29 @@ def _collections_snapshot(
     observed_amount = Decimal("0")
     overdue_amount = Decimal("0")
     due_next_30 = Decimal("0")
+    reviewed_documents = 0
+    reviewed_amount = Decimal("0")
+    classification_documents = {"credit": 0, "cash": 0, "unknown": 0}
+    classification_amounts = {
+        "credit": Decimal("0"),
+        "cash": Decimal("0"),
+        "unknown": Decimal("0"),
+    }
 
     for document in documents:
         if not isinstance(document, dict):
             continue
+        _, _, gross = _amounts(document)
+        classification = _payment_classification(document)
+        reviewed_documents += 1
+        reviewed_amount += gross
+        classification_documents[classification] += 1
+        classification_amounts[classification] += gross
         # Without a payment ledger, only documents explicitly issued on credit
         # are shown. They are credit exposure, not asserted unpaid balances.
-        if not payments_available and not _is_credit_document(document):
+        if not payments_available and classification != "credit":
             continue
         document_id = _document_id(document)
-        _, _, gross = _amounts(document)
         paid = min(gross, paid_by_document.get(document_id, Decimal("0")))
         amount = max(Decimal("0"), gross - paid) if payments_available else gross
         if amount <= 0:
@@ -360,10 +438,27 @@ def _collections_snapshot(
     customers = sorted(
         customer_rows.values(), key=lambda item: item["amount"], reverse=True
     )
+    unclassified_documents = classification_documents["unknown"]
+    classification_status = (
+        "missing"
+        if reviewed_documents and unclassified_documents == reviewed_documents
+        else "partial"
+        if unclassified_documents
+        else "complete"
+    )
     return {
         "mode": "registered_payments" if payments_available else "documentary_credit",
         "payments_available": payments_available,
         "as_of": cutoff.isoformat(),
+        "reviewed_documents": reviewed_documents,
+        "reviewed_amount": float(reviewed_amount),
+        "credit_documents": classification_documents["credit"],
+        "credit_amount": float(classification_amounts["credit"]),
+        "cash_documents": classification_documents["cash"],
+        "cash_amount": float(classification_amounts["cash"]),
+        "unclassified_documents": unclassified_documents,
+        "unclassified_amount": float(classification_amounts["unknown"]),
+        "classification_status": classification_status,
         "observed_amount": float(observed_amount),
         "overdue_amount": float(overdue_amount),
         "due_next_30": float(due_next_30),
