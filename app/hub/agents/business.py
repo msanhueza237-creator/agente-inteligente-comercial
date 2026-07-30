@@ -42,6 +42,10 @@ class CommercialAgent(BusinessAgent):
                     "segment_name": segment["name"],
                     "reason": segment["reason"],
                     "channel": segment["channel"],
+                    "priority": segment["priority"],
+                    "email_count": segment["email_count"],
+                    "whatsapp_count": segment["whatsapp_count"],
+                    "filters": segment["filters"],
                     "customer_keys": segment["customer_keys"],
                     "company_ids": segment["company_ids"],
                 },
@@ -54,7 +58,9 @@ class CommercialAgent(BusinessAgent):
                 f"Cartera unificada: {metrics['customers']} clientes, "
                 f"{metrics['contactable']} con canal de contacto y "
                 f"{metrics['tiendanube_customers']} vinculados a Climactiva.cl. "
-                f"Se prepararon {len(proposals)} segmentos para revision humana."
+                f"Hay {metrics['customers_at_risk']} clientes en riesgo o inactivos, "
+                f"{metrics['omnichannel_customers']} presentes en ambos canales y "
+                f"{len(proposals)} segmentos preparados para revision humana."
             ),
             metrics=metrics,
             proposals=proposals,

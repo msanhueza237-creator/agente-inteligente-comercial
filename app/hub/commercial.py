@@ -130,8 +130,15 @@ def _blank_customer(customer_key: str) -> dict[str, Any]:
         "sources": [],
         "facto_net_sales": 0.0,
         "facto_documents": 0,
+        "facto_net_sales_by_month": {},
         "tiendanube_gross_sales": 0.0,
         "tiendanube_orders": 0,
+        "tiendanube_sales_by_month": {},
+        "purchase_months": {},
+        "top_products": [],
+        "product_families": [],
+        "_product_units": {},
+        "_product_families": {},
         "first_purchase_at": None,
         "last_purchase_at": None,
         "source_ids": {},
@@ -273,13 +280,167 @@ def _upsert_customer(
     return target
 
 
-def _record_purchase(target: dict[str, Any], purchase_date: date | None) -> None:
+def _record_purchase(
+    target: dict[str, Any],
+    purchase_date: date | None,
+    *,
+    source: str,
+    amount: Decimal,
+) -> None:
     if purchase_date is None:
         return
     first = _date(target.get("first_purchase_at"))
     last = _date(target.get("last_purchase_at"))
     target["first_purchase_at"] = min(first, purchase_date).isoformat() if first else purchase_date.isoformat()
     target["last_purchase_at"] = max(last, purchase_date).isoformat() if last else purchase_date.isoformat()
+    month = purchase_date.strftime("%Y-%m")
+    purchase_months = target.setdefault("purchase_months", {})
+    purchase_months[month] = int(purchase_months.get(month, 0)) + 1
+    amount_key = (
+        "facto_net_sales_by_month"
+        if source == "facto"
+        else "tiendanube_sales_by_month"
+    )
+    amounts = target.setdefault(amount_key, {})
+    amounts[month] = float(Decimal(str(amounts.get(month, 0))) + amount)
+
+
+def _line_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return payload_rows(
+        payload,
+        "items",
+        "lines",
+        "details",
+        "detail",
+        "detalles",
+        "detalle",
+        "lineas",
+        "products",
+        "document_items",
+        "documentLines",
+    )
+
+
+def _product_family(value: Any) -> str:
+    name = _normalized_text(value)
+    families = (
+        (
+            "Bombas de condensado",
+            ("bomba condensado", "bomba de condensado", "condensate pump"),
+        ),
+        (
+            "Herramientas HVAC",
+            (
+                "bomba vacio",
+                "bomba de vacio",
+                "manifold",
+                "abocardador",
+                "expandidor",
+                "torquimetro",
+                "herramient",
+                "detector fuga",
+                "vacuometro",
+            ),
+        ),
+        (
+            "Refrigeración",
+            (
+                "refriger",
+                "gas r32",
+                "gas r410",
+                "gas r134",
+                "valvula solenoide",
+                "compresor",
+                "filtro secador",
+            ),
+        ),
+        (
+            "Tuberías y conexiones",
+            (
+                "tubo cobre",
+                "tuberia",
+                "tuerca flare",
+                "union",
+                "codo",
+                "tee ",
+                "conector",
+                "flare",
+            ),
+        ),
+        (
+            "Instalación y montaje",
+            (
+                "soporte",
+                "canaleta",
+                "cinta",
+                "aislacion",
+                "aislante",
+                "drenaje",
+                "manguera",
+            ),
+        ),
+        (
+            "Ventilación",
+            ("ventilador", "extractor", "rejilla", "difusor", "ventilacion"),
+        ),
+        (
+            "Equipos de climatización",
+            (
+                "split",
+                "aire acondicionado",
+                "climatizador",
+                "fan coil",
+                "fancoil",
+                "cassette",
+                "piso cielo",
+            ),
+        ),
+    )
+    for family, keywords in families:
+        if any(keyword in name for keyword in keywords):
+            return family
+    return "Otros productos HVAC"
+
+
+def _record_product_activity(target: dict[str, Any], payload: dict[str, Any]) -> None:
+    product_units = target.setdefault("_product_units", {})
+    family_units = target.setdefault("_product_families", {})
+    for line in _line_rows(payload):
+        product_name = _text(
+            _find(
+                line,
+                (
+                    "name",
+                    "product_name",
+                    "description",
+                    "descripcion",
+                    "detalle",
+                    "title",
+                ),
+                "product",
+                "item",
+            )
+        )
+        if not product_name:
+            continue
+        quantity = _decimal(
+            _find(
+                line,
+                ("quantity", "qty", "cantidad", "units", "unidades"),
+                "product",
+                "item",
+            )
+            or 1
+        )
+        if quantity <= 0:
+            quantity = Decimal("1")
+        product_units[product_name] = float(
+            Decimal(str(product_units.get(product_name, 0))) + quantity
+        )
+        family = _product_family(product_name)
+        family_units[family] = float(
+            Decimal(str(family_units.get(family, 0))) + quantity
+        )
 
 
 def extract_commercial_snapshot(
@@ -327,7 +488,13 @@ def extract_commercial_snapshot(
             Decimal(str(target["facto_net_sales"])) + net
         )
         target["facto_documents"] += 1
-        _record_purchase(target, _document_date(document))
+        _record_purchase(
+            target,
+            _document_date(document),
+            source="facto",
+            amount=net,
+        )
+        _record_product_activity(target, document)
 
     for index, row in enumerate(
         payload_rows(tiendanube_customers_payload, "customers", "data", "items")
@@ -358,10 +525,31 @@ def extract_commercial_snapshot(
         _record_purchase(
             target,
             _date(_first(order, "completed_at", "paid_at", "created_at", "date")),
+            source="tiendanube",
+            amount=_decimal(_first(order, "total", "total_amount", "subtotal")),
         )
+        _record_product_activity(target, order)
 
     rows: list[dict[str, Any]] = []
     for customer in customers.values():
+        product_units = customer.pop("_product_units", {})
+        family_units = customer.pop("_product_families", {})
+        customer["top_products"] = [
+            {"name": name, "units": units}
+            for name, units in sorted(
+                product_units.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:5]
+        ]
+        customer["product_families"] = [
+            {"name": name, "units": units}
+            for name, units in sorted(
+                family_units.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:5]
+        ]
         sources = sorted(customer["sources"])
         last_purchase = _date(customer.get("last_purchase_at"))
         first_purchase = _date(customer.get("first_purchase_at"))
@@ -473,6 +661,139 @@ def build_commercial_report(
         if "crm" not in target["sources"]:
             target["sources"].append("crm")
 
+    for row in customers:
+        row.pop("_product_units", None)
+        row.pop("_product_families", None)
+        row["sources"] = sorted(set(row.get("sources", [])))
+        if row.get("source_channel") not in {
+            "facto_only",
+            "tiendanube_only",
+            "both",
+        }:
+            row["source_channel"] = (
+                "both"
+                if {"facto", "tiendanube"}.issubset(row["sources"])
+                else "tiendanube_only"
+                if "tiendanube" in row["sources"]
+                else "facto_only"
+                if "facto" in row["sources"]
+                else "crm_only"
+            )
+        row["contactable"] = bool(
+            row.get("email") or row.get("whatsapp") or row.get("phone")
+        )
+        row["email_ready"] = bool(row.get("email"))
+        row["whatsapp_ready"] = bool(row.get("whatsapp"))
+        row["purchase_events"] = int(row.get("facto_documents", 0)) + int(
+            row.get("tiendanube_orders", 0)
+        )
+        row["average_net_ticket"] = (
+            float(
+                Decimal(str(row.get("facto_net_sales", 0)))
+                / Decimal(str(row["facto_documents"]))
+            )
+            if int(row.get("facto_documents", 0))
+            else 0.0
+        )
+        row["commercial_value"] = float(
+            Decimal(str(row.get("facto_net_sales", 0)))
+            or (
+                Decimal(str(row.get("tiendanube_gross_sales", 0)))
+                / Decimal("1.19")
+            )
+        )
+
+    ranked = sorted(
+        (
+            (index, Decimal(str(row.get("commercial_value", 0))))
+            for index, row in enumerate(customers)
+            if Decimal(str(row.get("commercial_value", 0))) > 0
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    value_position = {index: position for position, (index, _) in enumerate(ranked)}
+    action_labels = {
+        "rescue_priority": "Recuperar cliente valioso",
+        "convert_web_to_b2b": "Desarrollar comprador web",
+        "reactivate": "Reactivar cliente",
+        "onboard": "Acompañar cliente nuevo",
+        "loyalty_cross_sell": "Fidelizar y ampliar mix",
+        "complete_contact": "Completar datos de contacto",
+        "qualify": "Calificar prospecto",
+        "follow_up": "Seguimiento comercial",
+    }
+    priority_weights = {"urgent": 4, "high": 3, "medium": 2, "normal": 1}
+    opportunity_counts: Counter[str] = Counter()
+
+    for index, row in enumerate(customers):
+        position = value_position.get(index)
+        positive_count = max(1, len(ranked))
+        value_percentile = (
+            1 - (position / max(1, positive_count - 1))
+            if position is not None
+            else 0
+        )
+        value_points = round(value_percentile * 40)
+        lifecycle = _text(row.get("lifecycle"))
+        lifecycle_points = {
+            "new": 22,
+            "active": 25,
+            "at_risk": 13,
+            "dormant": 4,
+            "no_purchase": 0,
+        }.get(lifecycle, 0)
+        frequency_points = min(20, int(row.get("purchase_events", 0)) * 3)
+        source_points = 10 if row.get("source_channel") == "both" else 4
+        contact_points = 5 if row.get("contactable") else 0
+        score = min(
+            100,
+            value_points
+            + lifecycle_points
+            + frequency_points
+            + source_points
+            + contact_points,
+        )
+        row["commercial_score"] = score
+        row["value_tier"] = (
+            "A"
+            if score >= 75
+            else "B"
+            if score >= 55
+            else "C"
+            if score >= 35
+            else "D"
+        )
+
+        if not row.get("contactable"):
+            action = "complete_contact"
+            priority = "high"
+        elif row.get("source_channel") == "tiendanube_only":
+            action = "convert_web_to_b2b"
+            priority = "high" if row["purchase_events"] >= 2 else "medium"
+        elif lifecycle in {"at_risk", "dormant"} and row["value_tier"] in {"A", "B"}:
+            action = "rescue_priority"
+            priority = "urgent"
+        elif lifecycle == "dormant":
+            action = "reactivate"
+            priority = "high"
+        elif lifecycle == "new":
+            action = "onboard"
+            priority = "medium"
+        elif lifecycle == "active" and row["purchase_events"] >= 4:
+            action = "loyalty_cross_sell"
+            priority = "high" if row["value_tier"] in {"A", "B"} else "medium"
+        elif lifecycle == "no_purchase":
+            action = "qualify"
+            priority = "medium"
+        else:
+            action = "follow_up"
+            priority = "normal"
+        row["recommended_action"] = action
+        row["recommended_action_label"] = action_labels[action]
+        row["opportunity_priority"] = priority
+        opportunity_counts[priority] += 1
+
     source_counts = Counter(_text(row.get("source_channel")) for row in customers)
     lifecycle_counts = Counter(_text(row.get("lifecycle")) for row in customers)
     type_counts = Counter(_text(row.get("crm_type") or "sin_clasificar") for row in customers)
@@ -492,6 +813,8 @@ def build_commercial_report(
         predicate,
         *,
         channel: str = "email",
+        priority: str = "medium",
+        filters: dict[str, Any] | None = None,
     ) -> None:
         candidates = [row for row in customers if row.get("contactable") and predicate(row)]
         if not candidates:
@@ -502,7 +825,13 @@ def build_commercial_report(
                 "name": name,
                 "reason": reason,
                 "channel": channel,
+                "priority": priority,
                 "count": len(candidates),
+                "email_count": sum(1 for row in candidates if row.get("email_ready")),
+                "whatsapp_count": sum(
+                    1 for row in candidates if row.get("whatsapp_ready")
+                ),
+                "filters": filters or {},
                 "customer_keys": [row.get("customer_key") for row in candidates[:500]],
                 "company_ids": [
                     row.get("crm_company_id")
@@ -513,22 +842,50 @@ def build_commercial_report(
         )
 
     segment(
+        "valuable_customers_to_rescue",
+        "Clientes valiosos para recuperar",
+        "Cartera A/B con más de 90 días sin compra; requiere contacto personal antes de una campaña masiva.",
+        lambda row: row.get("recommended_action") == "rescue_priority",
+        priority="urgent",
+        filters={"recommended_action": "rescue_priority"},
+    )
+    segment(
         "web_customers_to_develop",
         "Compradores web para desarrollar",
-        "Compraron en Climactiva.cl y aun no tienen venta Facto vinculada.",
+        "Compraron en Climactiva.cl y aún no tienen venta Facto vinculada; oportunidad de convertirlos en clientes recurrentes.",
         lambda row: row.get("source_channel") == "tiendanube_only",
+        priority="high",
+        filters={"source_channel": "tiendanube_only"},
+    )
+    segment(
+        "loyal_customers_cross_sell",
+        "Clientes recurrentes para ampliar mix",
+        "Clientes activos con cuatro o más compras observadas y potencial de venta cruzada HVAC.",
+        lambda row: row.get("recommended_action") == "loyalty_cross_sell",
+        priority="high",
+        filters={"recommended_action": "loyalty_cross_sell"},
+    )
+    segment(
+        "new_customer_onboarding",
+        "Bienvenida y segunda compra",
+        "Clientes nuevos con contacto disponible; conviene acompañarlos hacia una segunda compra.",
+        lambda row: row.get("recommended_action") == "onboard",
+        filters={"recommended_action": "onboard"},
     )
     segment(
         "dormant_customers",
         "Clientes inactivos para reactivacion",
         "Tienen historial real, contacto disponible y mas de 180 dias sin compra.",
         lambda row: row.get("lifecycle") == "dormant",
+        filters={"lifecycle": "dormant"},
     )
     segment(
         "at_risk_customers",
         "Clientes en riesgo",
         "Llevan entre 91 y 180 dias sin compra y requieren revision comercial.",
         lambda row: row.get("lifecycle") == "at_risk",
+        priority="high",
+        filters={"lifecycle": "at_risk"},
     )
     segment(
         "hvac_technicians",
@@ -536,6 +893,15 @@ def build_commercial_report(
         "Clasificacion HVAC revisada en el CRM para campanas tecnicas.",
         lambda row: row.get("crm_type") in {"tecnico", "instalador grande"},
         channel="whatsapp",
+        filters={"crm_type": ["tecnico", "instalador grande"]},
+    )
+    segment(
+        "hvac_distribution",
+        "Distribuidores y tiendas HVAC",
+        "Cartera clasificada como distribuidor o tienda comercial para propuestas por volumen.",
+        lambda row: row.get("crm_type") in {"distribuidor", "tienda comercial"},
+        priority="high",
+        filters={"crm_type": ["distribuidor", "tienda comercial"]},
     )
 
     by_month: defaultdict[str, dict[str, int]] = defaultdict(
@@ -545,9 +911,42 @@ def build_commercial_report(
         first = _date(row.get("first_purchase_at"))
         if first:
             by_month[first.strftime("%Y-%m")]["new_customers"] += 1
-        last = _date(row.get("last_purchase_at"))
-        if last and first and last != first:
-            by_month[last.strftime("%Y-%m")]["returning_customers"] += 1
+        for month in sorted(row.get("purchase_months", {})):
+            if first and month != first.strftime("%Y-%m"):
+                by_month[month]["returning_customers"] += 1
+
+    priority_order = {"urgent": 0, "high": 1, "medium": 2, "normal": 3}
+    top_opportunities = [
+        {
+            "customer_key": row.get("customer_key"),
+            "crm_company_id": row.get("crm_company_id"),
+            "name": row.get("name") or row.get("legal_name"),
+            "tax_id": row.get("tax_id"),
+            "source_channel": row.get("source_channel"),
+            "lifecycle": row.get("lifecycle"),
+            "value_tier": row.get("value_tier"),
+            "commercial_score": row.get("commercial_score"),
+            "commercial_value": row.get("commercial_value"),
+            "purchase_events": row.get("purchase_events"),
+            "average_net_ticket": row.get("average_net_ticket"),
+            "recommended_action": row.get("recommended_action"),
+            "recommended_action_label": row.get("recommended_action_label"),
+            "opportunity_priority": row.get("opportunity_priority"),
+            "last_purchase_at": row.get("last_purchase_at"),
+            "email_ready": row.get("email_ready"),
+            "whatsapp_ready": row.get("whatsapp_ready"),
+            "top_products": row.get("top_products", []),
+            "product_families": row.get("product_families", []),
+        }
+        for row in sorted(
+            customers,
+            key=lambda item: (
+                priority_order.get(_text(item.get("opportunity_priority")), 9),
+                -int(item.get("commercial_score", 0)),
+                -float(item.get("commercial_value", 0)),
+            ),
+        )[:30]
+    ]
 
     return {
         "generated_at": datetime.now(UTC).isoformat(),
@@ -559,6 +958,10 @@ def build_commercial_report(
         "metrics": {
             "customers": len(customers),
             "contactable": contactable,
+            "email_ready": sum(1 for row in customers if row.get("email_ready")),
+            "whatsapp_ready": sum(
+                1 for row in customers if row.get("whatsapp_ready")
+            ),
             "facto_net_sales": float(total_net_sales),
             "facto_customers": sum(
                 1 for row in customers if "facto" in row.get("sources", [])
@@ -567,6 +970,19 @@ def build_commercial_report(
                 1 for row in customers if "tiendanube" in row.get("sources", [])
             ),
             "crm_companies": sum(1 for row in customers if row.get("crm_company_id")),
+            "active_customers": lifecycle_counts.get("active", 0)
+            + lifecycle_counts.get("new", 0),
+            "customers_at_risk": lifecycle_counts.get("at_risk", 0)
+            + lifecycle_counts.get("dormant", 0),
+            "omnichannel_customers": source_counts.get("both", 0),
+            "high_value_customers": sum(
+                1 for row in customers if row.get("value_tier") in {"A", "B"}
+            ),
+            "campaign_ready": sum(
+                1
+                for row in customers
+                if row.get("email_ready") or row.get("whatsapp_ready")
+            ),
         },
         "source_counts": dict(source_counts),
         "lifecycle_counts": dict(lifecycle_counts),
@@ -576,9 +992,12 @@ def build_commercial_report(
             {"month": month, **values} for month, values in sorted(by_month.items())
         ][-18:],
         "segments": segments,
+        "opportunity_counts": dict(opportunity_counts),
+        "top_opportunities": top_opportunities,
         "methodology": (
-            "Union automatica solo por RUT, email o telefono exactos. "
+            "Unión automática sólo por RUT, email o teléfono exactos. "
             "Facto es la fuente de venta neta; Tiendanube identifica el canal web "
-            "sin duplicar ese ingreso."
+            "sin duplicar ese ingreso. El puntaje comercial combina valor, recencia, "
+            "frecuencia, contacto y presencia en ambos canales; siempre requiere revisión humana."
         ),
     }

@@ -23,6 +23,12 @@ def test_commercial_snapshot_unifies_exact_rut_without_duplicating_sales() -> No
                 "net": 100000,
                 "tax": 19000,
                 "gross": 119000,
+                "details": [
+                    {
+                        "description": "Bomba de condensado Mini",
+                        "quantity": 2,
+                    }
+                ],
             }
         ],
         [
@@ -43,6 +49,12 @@ def test_commercial_snapshot_unifies_exact_rut_without_duplicating_sales() -> No
                     "name": "Clima Tecnica",
                     "identification": "76.123.456-7",
                 },
+                "products": [
+                    {
+                        "name": "Bomba de condensado Mini",
+                        "quantity": 1,
+                    }
+                ],
             }
         ],
         as_of=date(2026, 7, 30),
@@ -57,6 +69,15 @@ def test_commercial_snapshot_unifies_exact_rut_without_duplicating_sales() -> No
     assert customer["tiendanube_orders"] == 1
     assert customer["lifecycle"] == "new"
     assert customer["whatsapp"] == "+56911112222"
+    assert customer["purchase_months"] == {"2026-07": 2}
+    assert customer["top_products"][0] == {
+        "name": "Bomba de condensado Mini",
+        "units": 3.0,
+    }
+    assert customer["product_families"][0] == {
+        "name": "Bombas de condensado",
+        "units": 3.0,
+    }
 
 
 def test_commercial_snapshot_does_not_merge_similar_names_without_exact_identity() -> None:
@@ -119,3 +140,68 @@ def test_commercial_report_enriches_crm_type_and_prepares_reviewable_segments() 
     assert "dormant_customers" in segment_ids
     assert "hvac_technicians" in segment_ids
     assert all(segment["company_ids"] == ["crm-1"] for segment in report["segments"])
+
+
+def test_commercial_report_prioritizes_web_and_high_value_recovery() -> None:
+    report = build_commercial_report(
+        [
+            {
+                "customer_key": "rut:760000001",
+                "name": "Cliente Facto Valioso",
+                "tax_id": "760000001",
+                "email": "compras@valioso.cl",
+                "sources": ["facto"],
+                "source_channel": "facto_only",
+                "facto_net_sales": 8_000_000,
+                "facto_documents": 8,
+                "tiendanube_gross_sales": 0,
+                "tiendanube_orders": 0,
+                "first_purchase_at": "2025-01-01",
+                "last_purchase_at": "2026-01-01",
+                "purchase_months": {"2025-01": 1, "2026-01": 1},
+                "lifecycle": "dormant",
+                "contactable": True,
+                "region": "Metropolitana",
+                "city": "Santiago",
+                "source_ids": {},
+            },
+            {
+                "customer_key": "email:web@cliente.cl",
+                "name": "Comprador Web",
+                "email": "web@cliente.cl",
+                "phone": "+56911112222",
+                "whatsapp": "+56911112222",
+                "sources": ["tiendanube"],
+                "source_channel": "tiendanube_only",
+                "facto_net_sales": 0,
+                "facto_documents": 0,
+                "tiendanube_gross_sales": 238_000,
+                "tiendanube_orders": 2,
+                "first_purchase_at": "2026-06-01",
+                "last_purchase_at": "2026-07-01",
+                "purchase_months": {"2026-06": 1, "2026-07": 1},
+                "lifecycle": "active",
+                "contactable": True,
+                "region": "Metropolitana",
+                "city": "Ñuñoa",
+                "source_ids": {},
+            },
+        ],
+        [],
+    )
+
+    customers = {row["name"]: row for row in report["customers"]}
+    valuable = customers["Cliente Facto Valioso"]
+    web = customers["Comprador Web"]
+    assert valuable["recommended_action"] == "rescue_priority"
+    assert valuable["opportunity_priority"] == "urgent"
+    assert valuable["value_tier"] in {"A", "B"}
+    assert web["recommended_action"] == "convert_web_to_b2b"
+    assert web["whatsapp_ready"] is True
+    assert report["metrics"]["customers_at_risk"] == 1
+    assert report["metrics"]["campaign_ready"] == 2
+    assert report["opportunity_counts"]["urgent"] == 1
+    segment_ids = {segment["id"] for segment in report["segments"]}
+    assert "valuable_customers_to_rescue" in segment_ids
+    assert "web_customers_to_develop" in segment_ids
+    assert report["acquisition_by_month"][-1]["returning_customers"] == 1
