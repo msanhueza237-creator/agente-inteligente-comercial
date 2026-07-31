@@ -146,3 +146,46 @@ async def test_tiendanube_error_includes_provider_detail() -> None:
         assert "Token is invalid" in str(exc)
     else:
         raise AssertionError("Expected TiendanubeError")
+
+
+async def test_tiendanube_treats_404_after_first_customer_page_as_end() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = TiendanubeClient(
+        settings_for_tests(
+            tiendanube_enabled=True,
+            tiendanube_store_id="123",
+            tiendanube_access_token=SecretStr("token"),
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = await client.customers(page=4)
+
+    assert result == []
+    assert len(requests) == 2
+
+
+async def test_tiendanube_does_not_hide_404_on_first_order_page() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = TiendanubeClient(
+        settings_for_tests(
+            tiendanube_enabled=True,
+            tiendanube_store_id="123",
+            tiendanube_access_token=SecretStr("token"),
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        await client.orders(page=1)
+    except TiendanubeError as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("Expected TiendanubeError")

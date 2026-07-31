@@ -51,3 +51,24 @@ async def test_integration_records_split_large_documents_by_encoded_size() -> No
         request.kwargs["payload"]["records"][0]["external_id"]
         for request in requests
     ] == ["one", "two"]
+
+
+def test_stable_key_tracks_serialized_key_order_used_by_crm() -> None:
+    first = HubCRMPort._stable_key(
+        "facto",
+        "documents:0",
+        {"provider": "facto", "records": [{"a": 1, "b": 2}]},
+    )
+    replay = HubCRMPort._stable_key(
+        "facto",
+        "documents:0",
+        {"provider": "facto", "records": [{"a": 1, "b": 2}]},
+    )
+    reordered = HubCRMPort._stable_key(
+        "facto",
+        "documents:0",
+        {"provider": "facto", "records": [{"b": 2, "a": 1}]},
+    )
+
+    assert first == replay
+    assert first != reordered

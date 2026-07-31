@@ -11,7 +11,9 @@ from app.config import Settings
 
 
 class TiendanubeError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -106,7 +108,8 @@ class TiendanubeClient:
         if response.status_code >= 400:
             raise TiendanubeError(
                 f"Tiendanube devolvio un error ({response.status_code}): "
-                f"{self._safe_error_detail(response)}"
+                f"{self._safe_error_detail(response)}",
+                status_code=response.status_code,
             )
         return response.json()
 
@@ -135,10 +138,31 @@ class TiendanubeClient:
         return await self.get("products", params={"page": max(1, page), "per_page": per_page})
 
     async def orders(self, *, page: int = 1, per_page: int = 50) -> Any:
-        return await self.get("orders", params={"page": max(1, page), "per_page": per_page})
+        normalized_page = max(1, page)
+        try:
+            return await self.get(
+                "orders",
+                params={"page": normalized_page, "per_page": per_page},
+            )
+        except TiendanubeError as exc:
+            # Tiendanube returns 404 instead of an empty array when the caller
+            # advances past the final page.  That is a normal pagination
+            # boundary, but only after at least one page was read.
+            if normalized_page > 1 and exc.status_code == 404:
+                return []
+            raise
 
     async def customers(self, *, page: int = 1, per_page: int = 50) -> Any:
-        return await self.get("customers", params={"page": max(1, page), "per_page": per_page})
+        normalized_page = max(1, page)
+        try:
+            return await self.get(
+                "customers",
+                params={"page": normalized_page, "per_page": per_page},
+            )
+        except TiendanubeError as exc:
+            if normalized_page > 1 and exc.status_code == 404:
+                return []
+            raise
 
     async def health(self) -> TiendanubeHealth:
         if not self.configured:

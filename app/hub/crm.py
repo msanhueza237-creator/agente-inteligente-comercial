@@ -215,7 +215,15 @@ class HubCRMPort:
 
     @staticmethod
     def _stable_key(resource_id: str, action: str, payload: dict) -> str:
+        # The CRM currently hashes the parsed JSON preserving key insertion
+        # order.  Keep the idempotency-key equally order-aware: semantically
+        # equal objects with a different serialized order must not reuse an
+        # old key and be rejected as a conflicting request.
         digest = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
         ).hexdigest()
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"climactiva:{resource_id}:{action}:{digest}"))
