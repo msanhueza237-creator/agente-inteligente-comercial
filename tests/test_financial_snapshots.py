@@ -1,6 +1,7 @@
 from datetime import date
 
-from app.hub.finance import extract_financial_snapshot
+import app.hub.finance as finance
+from app.hub.finance import _parse_facto_pending_balance_text, extract_financial_snapshot
 
 
 def test_financial_snapshot_separates_net_sales_and_vat() -> None:
@@ -487,3 +488,67 @@ def test_financial_snapshot_uses_only_facto_receivable_balances() -> None:
     assert partial["gross_amount"] == 119000
     assert partial["paid_amount"] == 100000
     assert partial["observed_amount"] == 19000
+
+
+def test_parse_facto_pending_balance_from_exact_pdf_footer() -> None:
+    parsed = _parse_facto_pending_balance_text(
+        "Saldo pendiente a pagar al 31-07-2026 (Este documento) $2.875.351"
+    )
+
+    assert parsed == (finance.Decimal("2875351"), date(2026, 7, 31))
+    assert _parse_facto_pending_balance_text("Total documento $4.313.026") is None
+
+
+def test_financial_snapshot_uses_exact_facto_pdf_balance_as_fallback(monkeypatch) -> None:
+    documents = [
+        {
+            "document_id": "INV-PDF-1",
+            "document_number": "1512",
+            "document_type_id": 2,
+            "header": {
+                "issue_date": "2026-07-02",
+                "total_amount": 4765848,
+                "receiver_legal_name": "Acondiparts Center SpA",
+                "receiver_tax_id_code": "76.792.857-2",
+            },
+            "payment_information": {"due_date": "2026-07-20"},
+        }
+    ]
+
+    monkeypatch.setattr(
+        finance,
+        "_facto_pdf_receivables",
+        lambda rows: (
+            [
+                {
+                    "document_id": "INV-PDF-1",
+                    "document_number": "1512",
+                    "saldo_pendiente": 3177222,
+                    "saldo_pendiente_fecha": "2026-07-31",
+                    "collection_source": "facto_document_pdf",
+                }
+            ],
+            {
+                "documents_with_pdf": 1,
+                "documents_with_balance": 1,
+                "percent": 100.0,
+                "complete": True,
+            },
+        ),
+    )
+
+    report = extract_financial_snapshot(
+        documents,
+        generated_on=date(2026, 7, 31),
+    )[0]["payload"]
+    collections = report["collections"]
+
+    assert report["receivables_available"] is True
+    assert collections["mode"] == "facto_document_pdf"
+    assert collections["source"] == "facto_document_pdf"
+    assert collections["portfolio_complete"] is True
+    assert collections["as_of"] == "2026-07-31"
+    assert collections["observed_amount"] == 3177222
+    assert collections["overdue_amount"] == 3177222
+    assert collections["documents_detail"][0]["balance_as_of"] == "2026-07-31"
+    assert collections["documents_detail"][0]["balance_source"] == "facto_document_pdf"

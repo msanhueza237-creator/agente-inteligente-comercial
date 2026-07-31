@@ -115,6 +115,31 @@ async def test_collections_agent_uses_only_official_facto_receivables() -> None:
     assert result.evidence[0]["source"] == "facto_receivables"
 
 
+async def test_collections_agent_accepts_exact_facto_pdf_balance() -> None:
+    result = await AgentRegistry().get(AgentType.collections).execute(
+        HubTask(
+            id="task-collections-pdf",
+            agent_type=AgentType.collections,
+            action="review_aging",
+            payload={
+                "source": "facto_document_pdf",
+                "authoritative": True,
+                "overdue_amount": 3177222,
+                "invoice_ids": ["INV-PDF-1"],
+                "documents": [
+                    {"document_id": "INV-PDF-1", "observed_amount": 3177222}
+                ],
+            },
+        )
+    )
+
+    assert result.metrics["overdue_amount"] == 3177222
+    assert result.metrics["official_receivables_available"] is False
+    assert result.metrics["verified_receivables_available"] is True
+    assert len(result.proposals) == 1
+    assert result.evidence[0]["source"] == "facto_document_pdf"
+
+
 async def test_all_six_agents_are_registered() -> None:
     assert set(AgentRegistry().names()) == {agent.value for agent in AgentType}
 

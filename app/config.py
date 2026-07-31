@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # change. Example value (only when supplied by Facto): receivables
     facto_receivables_resource: str = ""
     facto_sync_interval_minutes: int = 30
+    # Facto's document PDF can include a current "Saldo pendiente a pagar".
+    # Refresh document details periodically so partial payments are not kept
+    # forever in the in-memory cache.
+    facto_document_detail_cache_minutes: int = 30
     facto_request_timeout_seconds: float = 30.0
     facto_read_only: bool = True
 
@@ -140,6 +144,7 @@ class Settings(BaseSettings):
                 raise ValueError("TIENDANUBE_API_BASE_URL must use HTTPS")
         if min(
             self.facto_sync_interval_minutes,
+            self.facto_document_detail_cache_minutes,
             self.tiendanube_sync_interval_minutes,
             self.hub_poll_seconds,
             self.hub_lease_seconds,

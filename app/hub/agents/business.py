@@ -171,18 +171,21 @@ class FinanceAgent(BusinessAgent):
 
 class CollectionsAgent(BusinessAgent):
     async def execute(self, task: HubTask) -> AgentResult:
+        source = str(task.payload.get("source") or "")
         if (
-            task.payload.get("source") != "facto_receivables"
+            source not in {"facto_receivables", "facto_document_pdf"}
             or not task.payload.get("authoritative")
         ):
             return AgentResult(
                 summary=(
                     "Facto aun no entrego el recurso oficial Cobranza -> Documentos "
-                    "impagos. El agente no calculara deuda desde facturas ni pagos."
+                    "impagos ni saldos exactos en sus PDF. El agente no calculara "
+                    "deuda desde totales de facturas ni pagos parciales."
                 ),
                 metrics={
                     "overdue_amount": 0,
                     "official_receivables_available": False,
+                    "verified_receivables_available": False,
                 },
                 warnings=[
                     "Esperando la ruta oficial de solo lectura solicitada a soporte de Facto"
@@ -195,7 +198,7 @@ class CollectionsAgent(BusinessAgent):
             summary=f"Cartera vencida informada: {overdue:.2f}. No se enviaran mensajes automaticamente.",
             payload={
                 "invoice_ids": task.payload.get("invoice_ids", []),
-                "source": "facto_receivables",
+                "source": source,
             },
             risk_level="high",
         )
@@ -203,11 +206,12 @@ class CollectionsAgent(BusinessAgent):
             summary=proposal.summary,
             metrics={
                 "overdue_amount": float(overdue),
-                "official_receivables_available": True,
+                "official_receivables_available": source == "facto_receivables",
+                "verified_receivables_available": True,
             },
             evidence=[
                 {
-                    "source": "facto_receivables",
+                    "source": source,
                     "documents": task.payload.get("documents", []),
                 }
             ],

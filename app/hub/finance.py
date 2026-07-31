@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from io import BytesIO
 from typing import Any
+
+from pypdf import PdfReader
 
 from app.hub.inventory import payload_rows
 
@@ -24,6 +29,15 @@ MONTH_LABELS = (
     "Oct",
     "Nov",
     "Dic",
+)
+
+FACTO_PDF_MAX_BYTES = 15_000_000
+FACTO_PENDING_BALANCE_PATTERN = re.compile(
+    r"saldo\s+pendiente\s+a\s+pagar\s+al\s+"
+    r"(?P<as_of>\d{2}[-/.]\d{2}[-/.]\d{4})\s*"
+    r"(?:\(\s*este\s+documento\s*\))?\s*"
+    r"\$?\s*(?P<amount>\d[\d.\s]*(?:,\d{1,2})?)",
+    flags=re.IGNORECASE,
 )
 
 
@@ -328,6 +342,109 @@ def _reported_outstanding_amount(document: dict[str, Any]) -> Decimal | None:
     return None
 
 
+def _parse_facto_pending_balance_text(text: str) -> tuple[Decimal, date] | None:
+    """Read Facto's exact PDF footer without inferring debt from invoice totals."""
+
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    match = FACTO_PENDING_BALANCE_PATTERN.search(normalized)
+    if not match:
+        return None
+    raw_amount = match.group("amount").replace(" ", "").replace(".", "")
+    raw_amount = raw_amount.replace(",", ".")
+    try:
+        amount = Decimal(raw_amount)
+    except (InvalidOperation, ValueError):
+        return None
+    try:
+        day, month, year = (
+            int(value)
+            for value in re.split(r"[-/.]", match.group("as_of"))
+        )
+        as_of = date(year, month, day)
+    except (TypeError, ValueError):
+        return None
+    return max(Decimal("0"), amount), as_of
+
+
+def _facto_document_pdf(document: dict[str, Any]) -> str:
+    """Locate only Facto's documented electronic-document PDF field."""
+
+    electronic_document = document.get("electronic_document")
+    candidates = [
+        electronic_document.get("document_pdf")
+        if isinstance(electronic_document, dict)
+        else None,
+        document.get("document_pdf"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _receivable_from_facto_pdf(document: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract a dated outstanding balance from the last pages of a Facto PDF."""
+
+    encoded = _facto_document_pdf(document)
+    if not encoded:
+        return None
+    if encoded.startswith("data:"):
+        _, separator, encoded = encoded.partition(",")
+        if not separator:
+            return None
+    compact = re.sub(r"\s+", "", encoded)
+    if not compact or len(compact) > FACTO_PDF_MAX_BYTES * 2:
+        return None
+    compact += "=" * (-len(compact) % 4)
+    try:
+        pdf_bytes = base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not pdf_bytes.startswith(b"%PDF-") or len(pdf_bytes) > FACTO_PDF_MAX_BYTES:
+        return None
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes), strict=False)
+        pages = reader.pages[-2:] if len(reader.pages) > 2 else reader.pages
+        text = "\n".join(page.extract_text() or "" for page in pages)
+    except Exception:  # noqa: BLE001
+        return None
+    parsed = _parse_facto_pending_balance_text(text)
+    if not parsed:
+        return None
+    amount, as_of = parsed
+    return {
+        "document_id": _document_id(document),
+        "document_number": _document_number(document),
+        "saldo_pendiente": float(amount),
+        "saldo_pendiente_fecha": as_of.isoformat(),
+        "collection_source": "facto_document_pdf",
+    }
+
+
+def _facto_pdf_receivables(
+    documents: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Build exact per-document balances and report extraction coverage."""
+
+    rows: list[dict[str, Any]] = []
+    pdf_documents = 0
+    for document in documents:
+        if not isinstance(document, dict) or not _facto_document_pdf(document):
+            continue
+        pdf_documents += 1
+        receivable = _receivable_from_facto_pdf(document)
+        if receivable is not None:
+            rows.append(receivable)
+    matched = len(rows)
+    return rows, {
+        "documents_examined": len(documents),
+        "documents_with_pdf": pdf_documents,
+        "documents_with_balance": matched,
+        "percent": round(matched / pdf_documents * 100, 1) if pdf_documents else 0,
+        "complete": bool(pdf_documents and matched == pdf_documents),
+    }
+
+
 def _merge_receivable_rows(
     receivables: list[dict[str, Any]],
     documents: list[dict[str, Any]],
@@ -412,7 +529,7 @@ def _collections_snapshot(
     receivables_payload: Any | None,
     cutoff: date,
 ) -> dict[str, Any]:
-    receivable_rows = (
+    official_receivable_rows = (
         payload_rows(
             receivables_payload,
             "receivables",
@@ -424,7 +541,21 @@ def _collections_snapshot(
         if receivables_payload is not None
         else []
     )
-    receivables_available = receivables_payload is not None
+    official_receivables_available = receivables_payload is not None
+    pdf_receivable_rows, pdf_coverage = _facto_pdf_receivables(documents)
+    collection_mode = (
+        "facto_receivables"
+        if official_receivables_available
+        else "facto_document_pdf"
+        if pdf_receivable_rows
+        else "unavailable"
+    )
+    receivable_rows = (
+        official_receivable_rows
+        if official_receivables_available
+        else pdf_receivable_rows
+    )
+    receivables_available = official_receivables_available or bool(pdf_receivable_rows)
     external_payments = (
         payload_rows(payments_payload, "data", "payments", "items")
         if payments_payload is not None
@@ -435,8 +566,8 @@ def _collections_snapshot(
     # A payment ledger is useful evidence for documentary cash flow, but it is
     # not the same dataset as Facto's Cobranza -> Documentos impagos. It may be
     # partial, omit credit notes or contain applications that cannot be matched
-    # safely. Only the official collections resource can be authoritative for
-    # accounts receivable.
+    # safely. A collections row or the exact dated balance printed by Facto in
+    # its own document PDF can be used; invoice totals alone never can.
     authoritative_available = receivables_available
     payments = [*external_payments, *embedded]
     payments_by_month: dict[str, dict[str, Decimal | int]] = defaultdict(
@@ -503,7 +634,7 @@ def _collections_snapshot(
         if amount <= 0:
             continue
         due_date = _explicit_due_date(document)
-        due_source = "facto_cobranza" if due_date else "sin_fecha"
+        due_source = collection_mode if due_date else "sin_fecha"
         days_overdue = max(0, (cutoff - due_date).days) if due_date else 0
         if due_date is None:
             bucket = "Sin vencimiento"
@@ -566,6 +697,8 @@ def _collections_snapshot(
                 "gross_amount": float(gross),
                 "paid_amount": float(paid),
                 "observed_amount": float(amount),
+                "balance_as_of": document.get("saldo_pendiente_fecha"),
+                "balance_source": document.get("collection_source") or collection_mode,
                 "days_overdue": days_overdue,
                 "bucket": bucket,
             }
@@ -582,12 +715,36 @@ def _collections_snapshot(
         if unclassified_documents
         else "complete"
     )
+    collection_as_of = cutoff
+    if collection_mode == "facto_document_pdf":
+        balance_dates: list[date] = []
+        for document in source_documents:
+            raw_balance_date = (
+                document.get("saldo_pendiente_fecha")
+                if isinstance(document, dict)
+                else None
+            )
+            if not isinstance(raw_balance_date, str):
+                continue
+            try:
+                balance_dates.append(date.fromisoformat(raw_balance_date[:10]))
+            except ValueError:
+                continue
+        if balance_dates:
+            collection_as_of = max(balance_dates)
     return {
-        "mode": "facto_receivables" if receivables_available else "unavailable",
+        "mode": collection_mode,
+        "source": collection_mode,
         "authoritative": authoritative_available,
         "receivables_available": receivables_available,
+        "portfolio_complete": (
+            True
+            if official_receivables_available
+            else bool(pdf_coverage["complete"])
+        ),
+        "pdf_coverage": pdf_coverage,
         "payments_available": payments_available,
-        "as_of": cutoff.isoformat(),
+        "as_of": collection_as_of.isoformat(),
         "reviewed_documents": reviewed_documents,
         "reviewed_amount": float(reviewed_amount),
         "credit_documents": classification_documents["credit"],
@@ -643,11 +800,19 @@ def _collections_snapshot(
         ],
         "disclaimer": (
             "Saldo pendiente informado por el recurso oficial de Cobranza de Facto."
-            if receivables_available
+            if official_receivables_available
+            else (
+                "Saldo exacto y fechado leido de la linea 'Saldo pendiente a pagar' "
+                "del PDF oficial de cada documento Facto. El total corresponde solo "
+                f"a los {pdf_coverage['documents_with_balance']} PDF con esa evidencia; "
+                "no se estiman saldos en documentos sin coincidencia."
+            )
+            if pdf_receivable_rows
             else (
                 "Facto no entrego por API el recurso oficial Cobranza -> Documentos "
-                "impagos. Los pagos disponibles son solo informativos y no se usan "
-                "para calcular deuda. El CRM no muestra estimaciones de cobranza."
+                "impagos ni un PDF con la linea exacta de saldo pendiente. Los pagos "
+                "disponibles son solo informativos y no se usan para calcular deuda. "
+                "El CRM no muestra estimaciones de cobranza."
             )
         ),
     }

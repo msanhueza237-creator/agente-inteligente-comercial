@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from datetime import date
 
 from app.config import get_settings
@@ -18,9 +19,11 @@ from app.integrations.tiendanube import TiendanubeClient
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("clima_activa.hub")
 
-# Facto detail responses are stable after issuance. Keep them in memory so the
-# 30-minute monitor only requests new documents after the first full sync.
+# Product and line details are stable after issuance, but Facto can regenerate
+# the document PDF with the current "Saldo pendiente a pagar" after an abono.
+# Keep a bounded TTL instead of caching receivables evidence forever.
 _facto_document_detail_cache: dict[str, dict] = {}
+_facto_document_detail_cached_at: dict[str, float] = {}
 
 # Facto Chile: emitted sales documents and received purchase documents.
 # Dispatch guides and customs DIN records are excluded from financial totals
@@ -474,7 +477,18 @@ async def load_facto_details(
         if document_id is None:
             return row
         cache_key = str(document_id)
-        if cache_key in _facto_document_detail_cache:
+        client_settings = getattr(client, "settings", None)
+        cache_minutes = getattr(
+            client_settings,
+            "facto_document_detail_cache_minutes",
+            30,
+        )
+        cache_ttl_seconds = max(60, int(cache_minutes * 60))
+        cached_at = _facto_document_detail_cached_at.get(cache_key, 0)
+        if (
+            cache_key in _facto_document_detail_cache
+            and time.monotonic() - cached_at < cache_ttl_seconds
+        ):
             return merge_detail(row, _facto_document_detail_cache[cache_key])
         async with semaphore:
             try:
@@ -486,6 +500,7 @@ async def load_facto_details(
         if not detail_record:
             return row
         _facto_document_detail_cache[cache_key] = detail_record
+        _facto_document_detail_cached_at[cache_key] = time.monotonic()
         return merge_detail(row, detail_record)
 
     product_rows = payload_rows(products_payload, "data", "products", "items")
