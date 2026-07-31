@@ -51,7 +51,13 @@ class HubCRMPort:
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise HubCRMError(f"CRM transport failed ({type(exc).__name__})") from exc
         if response.status_code >= 400:
-            raise HubCRMError(f"CRM returned status {response.status_code}")
+            # The Edge Function returns validation/database errors as a small
+            # JSON object. Preserve that safe diagnostic so an integration
+            # rejection can be fixed without logging credentials or request
+            # payloads.
+            response_detail = response.text.strip()[:500]
+            suffix = f": {response_detail}" if response_detail else ""
+            raise HubCRMError(f"CRM returned status {response.status_code}{suffix}")
         return response
 
     @staticmethod
