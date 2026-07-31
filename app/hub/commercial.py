@@ -605,6 +605,7 @@ def extract_commercial_snapshot(
     for customer in customers.values():
         product_units = customer.pop("_product_units", {})
         family_units = customer.pop("_product_families", {})
+        customer.pop("_location_priority", None)
         customer["top_products"] = [
             {"name": name, "units": units}
             for name, units in sorted(
