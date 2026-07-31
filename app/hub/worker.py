@@ -181,6 +181,12 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                                 await load_facto_financial_documents(client)
                             )
                             facto_sales_documents = raw_documents
+                            # Some Facto accounts do not expose a standalone
+                            # /customers collection. Issued documents still
+                            # carry the legal name, RUT and purchase history
+                            # required to build the commercial portfolio, so a
+                            # missing optional customer route must not block it.
+                            facto_commercial_ready = True
                             try:
                                 inbox_documents = await load_facto_inbox_documents(client)
                                 raw_purchase_documents = enrich_facto_purchase_documents(

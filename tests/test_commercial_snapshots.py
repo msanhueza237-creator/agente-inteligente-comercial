@@ -3,6 +3,31 @@ from datetime import date
 from app.hub.commercial import build_commercial_report, extract_commercial_snapshot
 
 
+def test_commercial_snapshot_builds_facto_customer_from_document_only() -> None:
+    customers = extract_commercial_snapshot(
+        [],
+        [
+            {
+                "document_id": 501,
+                "receiver_business_name": "Cliente desde factura SpA",
+                "receiver_tax_id_code": "761112223",
+                "receiver_email": "compras@clientefactura.cl",
+                "issue_date": "2026-07-15",
+                "net": 250000,
+            }
+        ],
+        [],
+        [],
+        as_of=date(2026, 7, 30),
+    )
+
+    assert len(customers) == 1
+    assert customers[0]["name"] == "Cliente desde factura SpA"
+    assert customers[0]["tax_id"] == "761112223"
+    assert customers[0]["facto_documents"] == 1
+    assert customers[0]["facto_net_sales"] == 250000
+
+
 def test_commercial_snapshot_unifies_exact_rut_without_duplicating_sales() -> None:
     customers = extract_commercial_snapshot(
         [
