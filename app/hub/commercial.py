@@ -15,6 +15,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
+from app.hub.chile_geo import canonical_chilean_location
 from app.hub.finance import _amounts, _customer, _document_date
 from app.hub.inventory import payload_rows
 
@@ -127,6 +128,9 @@ def _blank_customer(customer_key: str) -> dict[str, Any]:
         "whatsapp": "",
         "region": "",
         "city": "",
+        "address": "",
+        "location_source": "",
+        "location_verified_at": None,
         "sources": [],
         "facto_net_sales": 0.0,
         "facto_documents": 0,
@@ -146,9 +150,32 @@ def _blank_customer(customer_key: str) -> dict[str, Any]:
 
 
 def _merge_contact(target: dict[str, Any], source: dict[str, Any]) -> None:
-    for key in ("name", "legal_name", "tax_id", "email", "phone", "region", "city"):
+    for key in ("name", "legal_name", "tax_id", "email", "phone"):
         if not target.get(key) and source.get(key):
             target[key] = source[key]
+
+    incoming_has_location = any(source.get(key) for key in ("region", "city", "address"))
+    incoming_date = _date(source.get("location_verified_at"))
+    current_date = _date(target.get("location_verified_at"))
+    incoming_priority = int(source.get("_location_priority") or 0)
+    current_priority = int(target.get("_location_priority") or 0)
+    should_replace_location = incoming_has_location and (
+        not any(target.get(key) for key in ("region", "city", "address"))
+        or incoming_priority > current_priority
+        or (
+            incoming_priority == current_priority
+            and incoming_date is not None
+            and (current_date is None or incoming_date >= current_date)
+        )
+    )
+    if should_replace_location:
+        for key in ("region", "city", "address", "location_source"):
+            if source.get(key):
+                target[key] = source[key]
+        if incoming_date:
+            target["location_verified_at"] = incoming_date.isoformat()
+        target["_location_priority"] = incoming_priority
+
     phone = _phone(source.get("phone") or target.get("phone"))
     if phone:
         target["phone"] = phone
@@ -191,6 +218,20 @@ def _facto_contact(row: dict[str, Any], *, source_id: str = "") -> dict[str, Any
         "name",
         "nombre",
     )
+    raw_region = find("receiver_region", "region", "state")
+    raw_city = find("receiver_city", "city", "commune", "comuna")
+    raw_district = find("receiver_district", "district", "county", "municipality")
+    region, city = canonical_chilean_location(
+        city=raw_city,
+        district=raw_district,
+        region=raw_region,
+    )
+    location_date = _document_date(row)
+    is_invoice_location = bool(
+        location_date
+        or isinstance(row.get("header"), dict)
+        or _first(row, "document_id", "issue_date")
+    )
     return {
         "name": _text(name),
         "legal_name": _text(find("legal_name", "business_name", "razon_social") or name),
@@ -208,8 +249,20 @@ def _facto_contact(row: dict[str, Any], *, source_id: str = "") -> dict[str, Any
         "phone": _phone(
             find("phone", "telephone", "mobile", "receiver_phone", "telefono", "celular")
         ),
-        "region": _text(find("region", "state", "receiver_region")),
-        "city": _text(find("city", "commune", "comuna", "receiver_city")),
+        "region": region or _text(raw_region),
+        "city": city or _text(raw_city or raw_district),
+        "address": _text(
+            find(
+                "receiver_address",
+                "address",
+                "street",
+                "street_address",
+                "direccion",
+            )
+        ),
+        "location_source": "facto_invoice" if is_invoice_location else "facto_customer",
+        "location_verified_at": location_date.isoformat() if location_date else None,
+        "_location_priority": 20 if is_invoice_location else 10,
         "source": "facto",
         "source_id": source_id
         or _text(find("client_id", "customer_id", "receiver_id", "id")),
@@ -236,6 +289,18 @@ def _tiendanube_contact(row: dict[str, Any], *, source_id: str = "") -> dict[str
             if part
         )
     )
+    raw_region = _first(billing, "province", "state", "region")
+    raw_city = _first(billing, "city", "locality")
+    raw_district = _first(billing, "commune", "district")
+    region, city = canonical_chilean_location(
+        city=raw_city,
+        district=raw_district,
+        region=raw_region,
+    )
+    location_date = _date(
+        _first(row, "created_at", "updated_at", "completed_at")
+        or _first(customer, "created_at", "updated_at")
+    )
     return {
         "name": name,
         "legal_name": _text(
@@ -251,8 +316,14 @@ def _tiendanube_contact(row: dict[str, Any], *, source_id: str = "") -> dict[str
             or _first(billing, "phone", "mobile")
             or row.get("contact_phone")
         ),
-        "region": _text(_first(billing, "province", "state", "region")),
-        "city": _text(_first(billing, "city", "locality", "commune")),
+        "region": region or _text(raw_region),
+        "city": city or _text(raw_district or raw_city),
+        "address": _text(
+            _first(billing, "address", "street", "address1", "street_address")
+        ),
+        "location_source": "tiendanube_order" if location_date else "tiendanube_customer",
+        "location_verified_at": location_date.isoformat() if location_date else None,
+        "_location_priority": 20 if location_date else 10,
         "source": "tiendanube",
         "source_id": source_id or _text(_first(customer, "id", "customer_id")),
     }
@@ -621,6 +692,11 @@ def build_commercial_report(
                 or company.get("whatsappNumber")
                 or company.get("phone")
             ),
+            "region": _text(company.get("region")),
+            "city": _text(company.get("city")),
+            "address": _text(company.get("address")),
+            "location_source": "crm_reviewed",
+            "_location_priority": 100,
         }
         _, company_aliases = _identity(
             crm_contact,
@@ -656,8 +732,14 @@ def build_commercial_report(
         target["crm_type"] = _text(company.get("type") or "otro")
         target["crm_status"] = _text(company.get("status") or "prospecto")
         target["crm_priority"] = _text(company.get("priority") or "media")
-        target["region"] = _text(company.get("region")) or target.get("region", "")
-        target["city"] = _text(company.get("city")) or target.get("city", "")
+        _merge_contact(
+            target,
+            {
+                **crm_contact,
+                "source": "crm",
+                "source_id": company.get("id"),
+            },
+        )
         target["source"] = _text(company.get("source"))
         if "crm" not in target["sources"]:
             target["sources"].append("crm")
@@ -665,6 +747,7 @@ def build_commercial_report(
     for row in customers:
         row.pop("_product_units", None)
         row.pop("_product_families", None)
+        row.pop("_location_priority", None)
         row["sources"] = sorted(set(row.get("sources", [])))
         if row.get("source_channel") not in {
             "facto_only",
@@ -724,7 +807,6 @@ def build_commercial_report(
         "qualify": "Calificar prospecto",
         "follow_up": "Seguimiento comercial",
     }
-    priority_weights = {"urgent": 4, "high": 3, "medium": 2, "normal": 1}
     opportunity_counts: Counter[str] = Counter()
 
     for index, row in enumerate(customers):

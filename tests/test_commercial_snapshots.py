@@ -28,6 +28,79 @@ def test_commercial_snapshot_builds_facto_customer_from_document_only() -> None:
     assert customers[0]["facto_net_sales"] == 250000
 
 
+def test_commercial_snapshot_uses_latest_facto_invoice_location_and_derives_region() -> None:
+    customers = extract_commercial_snapshot(
+        [],
+        [
+            {
+                "document_id": 737,
+                "issue_date": "2026-07-29",
+                "net": 100000,
+                "header": {
+                    "receiver_business_name": (
+                        "MARBA - REFRIGERACIÓN, AIRE ACONDICIONADO, CLIMATIZACION SPA"
+                    ),
+                    "receiver_tax_id_code": "76.919.986-1",
+                    "receiver_address": "AVENIDA SAN MARTIN 01295",
+                    "receiver_city": "TEMUCO",
+                    "receiver_district": "TEMUCO",
+                },
+            },
+            {
+                "document_id": 719,
+                "issue_date": "2026-07-08",
+                "net": 50000,
+                "header": {
+                    "receiver_business_name": (
+                        "MARBA - REFRIGERACIÓN, AIRE ACONDICIONADO, CLIMATIZACION SPA"
+                    ),
+                    "receiver_tax_id_code": "76.919.986-1",
+                    "receiver_address": "DIRECCION HISTORICA",
+                    "receiver_city": "TEMUCO",
+                    "receiver_district": "AYSÉN",
+                },
+            },
+        ],
+        [],
+        [],
+        as_of=date(2026, 7, 30),
+    )
+
+    assert len(customers) == 1
+    customer = customers[0]
+    assert customer["address"] == "AVENIDA SAN MARTIN 01295"
+    assert customer["city"] == "Temuco"
+    assert customer["region"] == "Región de La Araucanía"
+    assert customer["location_source"] == "facto_invoice"
+    assert customer["location_verified_at"] == "2026-07-29"
+
+
+def test_commercial_snapshot_prefers_comuna_over_generic_city() -> None:
+    customers = extract_commercial_snapshot(
+        [],
+        [
+            {
+                "document_id": 1,
+                "issue_date": "2026-07-20",
+                "net": 1000,
+                "header": {
+                    "receiver_business_name": "Cliente Macul",
+                    "receiver_tax_id_code": "76.000.001-1",
+                    "receiver_address": "Los Plátanos 3406",
+                    "receiver_city": "Santiago",
+                    "receiver_district": "Macul",
+                },
+            }
+        ],
+        [],
+        [],
+        as_of=date(2026, 7, 30),
+    )
+
+    assert customers[0]["city"] == "Macul"
+    assert customers[0]["region"] == "Región Metropolitana de Santiago"
+
+
 def test_commercial_snapshot_unifies_exact_rut_without_duplicating_sales() -> None:
     customers = extract_commercial_snapshot(
         [
