@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "currency": "USD",
   "reference": {
     "dispatch": "49194",
@@ -22,7 +22,7 @@
     "reference_exchange_rate_clp_usd": 904.14
   },
   "derived_rates": {
-    "freight_usd_per_cbm": 39.6354,
+    "freight_usd_per_cbm": 121.4286,
     "insurance_percent_fob": 0.3487,
     "customs_duty_percent_cif": 0.5223,
     "local_and_agency_usd_per_cbm": 26.1656,
@@ -32,10 +32,11 @@
   "accounting_policy": {
     "recoverable_import_vat_is_landed_cost": false,
     "recoverable_import_vat_is_cash_requirement": true,
-    "estimate_basis": "historical_actual_import",
+    "estimate_basis": "latest_verified_ads_20gp_freight_plus_historical_actual_import",
     "notes": [
       "El IVA de importacion se informa como necesidad de caja recuperable y no se suma al costo puesto en bodega.",
-      "Flete, seguro, derechos, gastos locales netos y honorarios netos se distribuyen por m3 o por FOB segun la evidencia disponible."
+      "El flete base del contenedor 20GP usa la ultima factura ADS verificada; seguro, derechos, gastos locales netos y honorarios netos conservan la referencia del despacho 49194.",
+      "Para comparar productos, el flete se asigna por m3; el total consolidado reconoce el costo completo de cada contenedor requerido."
     ]
   }
 }

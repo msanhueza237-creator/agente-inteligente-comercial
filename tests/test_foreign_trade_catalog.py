@@ -5,6 +5,7 @@ import pytest
 from app.foreign_trade.catalog import (
     build_foreign_trade_report,
     load_active_imports,
+    load_freight_history,
     load_import_catalog,
 )
 from app.hub.agents.registry import AgentRegistry
@@ -20,6 +21,16 @@ def test_import_catalog_preserves_product_volume_evidence() -> None:
         item.get("unit_cbm") and item.get("source_document")
         for item in catalog["items"]
     )
+
+
+def test_freight_reference_uses_latest_verified_ads_20gp_invoice() -> None:
+    freight = load_freight_history()
+
+    assert freight["provider"]["name"] == "ADS INTERNACIONAL CARGO SPA"
+    assert freight["container_policy"]["type"] == "20GP"
+    assert freight["container_policy"]["planning_capacity_cbm"] == pytest.approx(28)
+    assert freight["summary"]["latest_invoice_number"] == "1702"
+    assert freight["summary"]["latest_verified_usd"] == pytest.approx(3400)
 
 
 def test_active_import_tracks_full_proforma_and_timeline() -> None:
@@ -90,6 +101,12 @@ def test_import_report_separates_recoverable_vat_from_landed_cost() -> None:
         + proposal["totals"]["recoverable_import_vat_cash_usd"]
     )
     assert proposal["totals"]["fob_usd"] <= 70000
+    assert proposal["container_type"] == "20GP"
+    assert proposal["container_reference_cbm"] == pytest.approx(28)
+    assert proposal["totals"]["freight_usd"] == pytest.approx(3400)
+    assert proposal["container_remaining_cbm"] == pytest.approx(
+        28 - proposal["totals"]["total_cbm"], abs=0.02
+    )
 
 
 def test_import_report_excludes_replenishment_without_volume_evidence() -> None:

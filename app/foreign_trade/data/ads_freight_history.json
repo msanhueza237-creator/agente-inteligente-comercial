@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "provider": {
+    "name": "ADS INTERNACIONAL CARGO SPA",
+    "domain": "adscargas.cl"
+  },
+  "lane": "Ningbo - San Antonio",
+  "container_policy": {
+    "type": "20GP",
+    "planning_capacity_cbm": 28.0,
+    "target_fill_percent": 90.0,
+    "basis": "Capacidad util de planificacion definida para las compras de Importadora Latin Chile"
+  },
+  "selection_policy": "latest_verified_ocean_freight_invoice",
+  "verified_ocean_freight": [
+    {
+      "invoice_number": "1214",
+      "invoice_date": "2026-01-20",
+      "bl": "NGBAGN25120010",
+      "route": "Ningbo - San Antonio",
+      "container_type": "20GP",
+      "amount_usd": 2000.0,
+      "source": {
+        "gmail_message_id": "19bdd02c1628ddfe",
+        "attachment": "F1214.pdf"
+      }
+    },
+    {
+      "invoice_number": "1702",
+      "invoice_date": "2026-06-03",
+      "bl": "ESL26041354",
+      "route": "Ningbo - San Antonio",
+      "container_type": "20GP",
+      "amount_usd": 3400.0,
+      "source": {
+        "gmail_message_id": "19e8dd49e01db5df",
+        "attachment": "F1702.pdf"
+      }
+    }
+  ],
+  "summary": {
+    "latest_invoice_number": "1702",
+    "latest_verified_usd": 3400.0,
+    "historical_min_usd": 2000.0,
+    "historical_max_usd": 3400.0,
+    "historical_average_usd": 2700.0
+  },
+  "notes": [
+    "El flete maritimo se toma de la factura ADS mas reciente verificada para un contenedor 20GP.",
+    "Emision de BL, apertura, DTHC y Gate In se conservan como cargos separados y no se mezclan con el flete maritimo."
+  ]
+}

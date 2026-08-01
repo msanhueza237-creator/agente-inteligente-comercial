@@ -58,6 +58,10 @@ def load_active_imports() -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_freight_history() -> dict[str, Any]:
+    return json.loads((DATA_DIR / "ads_freight_history.json").read_text(encoding="utf-8"))
+
+
 def _match_catalog_item(
     product: dict[str, Any], catalog: list[dict[str, Any]]
 ) -> tuple[dict[str, Any] | None, float, str]:
@@ -151,6 +155,42 @@ def _sum_costs(rows: list[dict[str, Any]]) -> dict[str, float]:
     return {key: round(sum(float(row["costs"].get(key, 0)) for row in rows), 2) for key in keys}
 
 
+def _consolidated_costs(
+    rows: list[dict[str, Any]], *, rates: dict[str, Any], freight_history: dict[str, Any]
+) -> dict[str, float]:
+    """Calcula la caja real de la orden, incluido el flete completo por contenedor 20GP."""
+    row_totals = _sum_costs(rows)
+    fob = _decimal(row_totals.get("fob_usd"))
+    total_cbm = _decimal(row_totals.get("total_cbm"))
+    if fob <= 0:
+        return row_totals
+
+    container_policy = freight_history.get("container_policy") or {}
+    capacity = max(Decimal("1"), _decimal(container_policy.get("planning_capacity_cbm")))
+    container_count = max(1, int((total_cbm / capacity).to_integral_value(rounding=ROUND_UP)))
+    latest_freight = _decimal((freight_history.get("summary") or {}).get("latest_verified_usd"))
+    freight = latest_freight * container_count
+    insurance = fob * _decimal(rates.get("insurance_percent_fob")) / 100
+    cif = fob + freight + insurance
+    duty = cif * _decimal(rates.get("customs_duty_percent_cif")) / 100
+    if total_cbm > 0:
+        local = total_cbm * _decimal(rates.get("local_and_agency_usd_per_cbm"))
+    else:
+        local = fob * _decimal(rates.get("fallback_nonrecoverable_cost_percent_fob")) / 100
+    landed = cif + duty + local
+    vat_cash = (cif + duty) * _decimal(rates.get("import_vat_percent")) / 100
+    return {
+        "fob_usd": _round(fob),
+        "freight_usd": _round(freight),
+        "insurance_usd": _round(insurance),
+        "customs_duty_usd": _round(duty),
+        "local_and_agency_usd": _round(local),
+        "landed_cost_usd": _round(landed),
+        "recoverable_import_vat_cash_usd": _round(vat_cash),
+        "total_cbm": _round(total_cbm, "0.0001"),
+    }
+
+
 def build_foreign_trade_report(
     products: list[dict[str, Any]], *, as_of: date | None = None
 ) -> dict[str, Any]:
@@ -158,6 +198,7 @@ def build_foreign_trade_report(
     planner = ForeignTradePlanner()
     catalog_payload = load_import_catalog()
     cost_model = load_import_cost_model()
+    freight_history = load_freight_history()
     active_import_payload = load_active_imports()
     catalog = [item for item in catalog_payload.get("items", []) if isinstance(item, dict)]
     active_imports = [
@@ -259,7 +300,9 @@ def build_foreign_trade_report(
     )
     selected: list[dict[str, Any]] = []
     remaining_budget = planner.hard_po_max_usd
-    remaining_cbm = _decimal(cost_model["reference"].get("total_cbm"))
+    container_policy = freight_history.get("container_policy") or {}
+    container_capacity_cbm = _decimal(container_policy.get("planning_capacity_cbm"))
+    remaining_cbm = container_capacity_cbm
     for row in candidates:
         unit_fob = _decimal(row["unit_fob_usd"])
         unit_cbm = _decimal(row["unit_cbm"])
@@ -281,7 +324,7 @@ def build_foreign_trade_report(
         if remaining_budget <= 0 or remaining_cbm <= 0:
             break
 
-    totals = _sum_costs(selected)
+    totals = _consolidated_costs(selected, rates=rates, freight_history=freight_history)
     target_status = (
         "target_range_50000_70000"
         if planner.target_po_min_usd <= _decimal(totals["fob_usd"]) <= planner.hard_po_max_usd
@@ -301,6 +344,21 @@ def build_foreign_trade_report(
             f"{len(missing_volume_risks)} productos con necesidad de reposicion quedan fuera "
             "de la orden hasta confirmar su m3 unitario."
         )
+    utilization_percent = (
+        float(_decimal(totals.get("total_cbm")) / container_capacity_cbm * 100)
+        if totals["total_cbm"] and container_capacity_cbm
+        else 0
+    )
+    remaining_container_cbm = max(
+        Decimal("0"), container_capacity_cbm - _decimal(totals.get("total_cbm"))
+    )
+    if totals["total_cbm"] and utilization_percent < float(
+        _decimal(container_policy.get("target_fill_percent"))
+    ):
+        warnings.append(
+            "El contenedor 20GP queda bajo el objetivo de llenado; faltan "
+            f"{_round(remaining_container_cbm, '0.01')} m3 por consolidar."
+        )
     warnings.append("El IVA de importacion se informa como necesidad de caja recuperable y no como costo del inventario.")
 
     active_import_reports: list[dict[str, Any]] = []
@@ -313,11 +371,16 @@ def build_foreign_trade_report(
             0, min(planner.policy.production_days, (as_of - production_start).days)
         )
         active_totals = active_import.get("totals") or {}
-        estimated_costs = _landed_cost(
-            unit_fob=_decimal(active_totals.get("fob_usd")),
-            unit_cbm=_decimal(active_totals.get("total_cbm")),
-            quantity=1,
-            rates=rates,
+        active_cost_row = {
+            "costs": _landed_cost(
+                unit_fob=_decimal(active_totals.get("fob_usd")),
+                unit_cbm=_decimal(active_totals.get("total_cbm")),
+                quantity=1,
+                rates=rates,
+            )
+        }
+        estimated_costs = _consolidated_costs(
+            [active_cost_row], rates=rates, freight_history=freight_history
         )
         active_import_reports.append(
             {
@@ -377,6 +440,7 @@ def build_foreign_trade_report(
             ],
         },
         "historical_cost_reference": cost_model,
+        "freight_reference": freight_history,
         "active_imports": active_import_reports,
         "demand_multiplier": float(demand_multiplier),
         "projected_arrival_date": projected_arrival.isoformat(),
@@ -386,13 +450,14 @@ def build_foreign_trade_report(
             "status": target_status,
             "items": selected,
             "totals": totals,
-            "container_reference_cbm": float(_decimal(cost_model["reference"].get("total_cbm"))),
-            "container_utilization_percent": round(
-                totals["total_cbm"] / float(_decimal(cost_model["reference"].get("total_cbm"))) * 100,
-                1,
-            )
-            if totals["total_cbm"]
-            else 0,
+            "container_type": container_policy.get("type", "20GP"),
+            "container_reference_cbm": float(container_capacity_cbm),
+            "container_utilization_percent": round(utilization_percent, 1),
+            "container_remaining_cbm": _round(remaining_container_cbm, "0.01"),
+            "container_count": 1 if totals["total_cbm"] else 0,
+            "total_units": sum(int(row["recommended_units"]) for row in selected),
+            "total_skus": len(selected),
+            "freight_reference": freight_history.get("summary", {}),
             "required_order_date": min(
                 (row["required_order_date"] for row in selected if row["required_order_date"]),
                 default=None,
@@ -402,7 +467,8 @@ def build_foreign_trade_report(
         },
         "methodology": (
             "Cruce exacto por SKU y, en segundo termino, similitud de nombre. La demanda proviene de ventas Facto; "
-            "el volumen y FOB provienen de documentos Chinafore; los costos logisticos usan el despacho real 49194. "
+            "el volumen y FOB provienen de documentos Chinafore; el flete maritimo usa la ultima factura ADS "
+            "verificada para un 20GP y los demas costos logisticos conservan el despacho real 49194. "
             "La proforma 26TDC12 se considera mercaderia confirmada en produccion y descuenta necesidad futura, "
             "pero no incrementa el stock disponible antes de su recepcion en bodega."
         ),
