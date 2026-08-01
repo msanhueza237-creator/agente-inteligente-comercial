@@ -239,6 +239,8 @@ def test_financial_snapshot_adds_net_purchases_and_supplier_ranking() -> None:
     )[0]["payload"]
 
     assert report["net_purchases"] == 380000
+    assert report["purchase_tax"] == 57000
+    assert report["gross_purchases"] == 437000
     assert report["purchase_document_count"] == 4
     assert report["supplier_count"] == 2
     assert report["purchases_available"] is True
@@ -251,6 +253,16 @@ def test_financial_snapshot_adds_net_purchases_and_supplier_ranking() -> None:
     assert comparison["purchase_growth_percent"] == 180
     assert comparison["months"][2]["current_net_purchases"] == 200000
     assert comparison["months"][2]["previous_net_purchases"] == 100000
+    march_2026 = next(
+        month for month in report["purchases_by_month"] if month["month"] == "2026-03"
+    )
+    assert march_2026 == {
+        "month": "2026-03",
+        "net_purchases": 200000,
+        "tax": 38000,
+        "gross_purchases": 238000,
+        "documents": 2,
+    }
 
 
 def test_financial_snapshot_does_not_use_payments_as_accounts_receivable() -> None:

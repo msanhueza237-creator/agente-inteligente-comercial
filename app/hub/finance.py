@@ -1013,9 +1013,22 @@ def _supplier(document: dict[str, Any]) -> tuple[str, str]:
     return name, tax_id
 
 
+def _purchase_amounts(document: dict[str, Any]) -> tuple[Decimal, Decimal, Decimal]:
+    """Return signed purchase net, VAT and gross amounts.
+
+    Received credit notes reverse the original purchase. Keeping all three
+    amounts signed lets the CRM reconcile purchases and input VAT without
+    inventing either value from the other.
+    """
+
+    net, tax, gross = _amounts(document)
+    if _document_type_id(document) in PURCHASE_CREDIT_NOTE_TYPE_IDS:
+        return -abs(net), -abs(tax), -abs(gross)
+    return net, tax, gross
+
+
 def _purchase_net_amount(document: dict[str, Any]) -> Decimal:
-    net, _, _ = _amounts(document)
-    return -abs(net) if _document_type_id(document) in PURCHASE_CREDIT_NOTE_TYPE_IDS else net
+    return _purchase_amounts(document)[0]
 
 
 def _annual_comparison(
@@ -1157,11 +1170,18 @@ def extract_financial_snapshot(
     tax = Decimal("0")
     gross_sales = Decimal("0")
     purchases_by_month: dict[str, dict[str, Decimal | int]] = defaultdict(
-        lambda: {"net_purchases": Decimal("0"), "documents": 0}
+        lambda: {
+            "net_purchases": Decimal("0"),
+            "tax": Decimal("0"),
+            "gross_purchases": Decimal("0"),
+            "documents": 0,
+        }
     )
     suppliers: dict[str, dict[str, Any]] = {}
     dated_purchases: list[tuple[date, Decimal]] = []
     net_purchases = Decimal("0")
+    purchase_tax = Decimal("0")
+    gross_purchases = Decimal("0")
 
     for document in documents:
         if not isinstance(document, dict):
@@ -1198,12 +1218,16 @@ def extract_financial_snapshot(
         issued = _document_date(document)
         if issued:
             dates.append(issued)
-        net = _purchase_net_amount(document)
+        net, document_tax, gross = _purchase_amounts(document)
         net_purchases += net
+        purchase_tax += document_tax
+        gross_purchases += gross
         if issued:
             dated_purchases.append((issued, net))
         month = issued.strftime("%Y-%m") if issued else "sin_fecha"
         purchases_by_month[month]["net_purchases"] += net
+        purchases_by_month[month]["tax"] += document_tax
+        purchases_by_month[month]["gross_purchases"] += gross
         purchases_by_month[month]["documents"] += 1
         supplier_name, supplier_tax_id = _supplier(document)
         supplier_key = supplier_tax_id or supplier_name.casefold()
@@ -1266,6 +1290,8 @@ def extract_financial_snapshot(
         "tax": float(tax),
         "gross_sales": float(gross_sales),
         "net_purchases": float(net_purchases),
+        "purchase_tax": float(purchase_tax),
+        "gross_purchases": float(gross_purchases),
         "purchase_document_count": len(purchase_documents),
         "average_net_ticket": float(net_sales / document_count) if document_count else 0,
         "reference_cost_of_sales": float(reference_cost),
