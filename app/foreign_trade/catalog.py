@@ -169,7 +169,7 @@ def build_foreign_trade_report(
             "supplier": active_import.get("supplier"),
             "order_number": active_import.get("order_number"),
             "source_document": (active_import.get("source") or {}).get("file"),
-            "source_row": item.get("line_number"),
+            "source_row": item.get("source_line_label") or item.get("source_line_number") or item.get("line_number"),
         }
         for active_import in active_imports
         for item in active_import.get("items", [])
