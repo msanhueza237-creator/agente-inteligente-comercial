@@ -4,6 +4,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from app.foreign_trade.catalog import build_foreign_trade_report
 from app.foreign_trade.planning import ForeignTradePlanner, InventoryPosition
 from app.hub.agents.base import BusinessAgent
 from app.hub.commercial import build_commercial_report
@@ -375,6 +376,89 @@ class ForeignTradeAgent(BusinessAgent):
         self.planner = ForeignTradePlanner()
 
     async def execute(self, task: HubTask) -> AgentResult:
+        if task.action == "review_import_plan":
+            products = [
+                row for row in task.payload.get("products", []) if isinstance(row, dict)
+            ]
+            if not products:
+                return AgentResult(
+                    summary="No hay inventario Facto disponible para cruzar con el catalogo de importacion.",
+                    warnings=[
+                        "Sin stock y ventas por SKU no se propone una orden de compra."
+                    ],
+                )
+            raw_as_of = str(task.payload.get("as_of") or date.today().isoformat())
+            report = build_foreign_trade_report(
+                products,
+                as_of=date.fromisoformat(raw_as_of),
+            )
+            catalog = report["catalog"]
+            purchase = report["purchase_proposal"]
+            totals = purchase["totals"]
+            items = purchase["items"]
+            proposals: list[ActionProposal] = []
+            if items:
+                proposals.append(
+                    ActionProposal(
+                        kind=ProposalKind.purchase_order,
+                        title="Orden Chinafore consolidada para revision",
+                        summary=(
+                            f"{len(items)} productos por USD {totals['fob_usd']:.2f} FOB, "
+                            f"{totals['total_cbm']:.2f} m3 y costo puesto estimado "
+                            f"USD {totals['landed_cost_usd']:.2f}."
+                        ),
+                        payload={
+                            "source_agent": "foreign_trade",
+                            "supplier": "Chinafore",
+                            "purchase_proposal": purchase,
+                            "human_approval_required": True,
+                        },
+                        risk_level="high",
+                    )
+                )
+            summary = (
+                f"Se cruzaron {catalog['matched_inventory_products']} productos de Facto "
+                f"con {catalog['products']} referencias de importacion; "
+                f"{catalog['matched_with_cbm']} coincidencias tienen volumen unitario. "
+            )
+            if items:
+                summary += (
+                    f"La propuesta consolidada contiene {len(items)} productos por "
+                    f"USD {totals['fob_usd']:.2f} FOB y {totals['total_cbm']:.2f} m3. "
+                    "Queda pendiente de aprobacion humana."
+                )
+            else:
+                summary += (
+                    "No se genero una orden porque las coincidencias no requieren reposicion "
+                    "con la demanda disponible."
+                )
+            return AgentResult(
+                summary=summary,
+                metrics={
+                    "catalog_products": int(catalog["products"]),
+                    "catalog_with_cbm": int(catalog["with_cbm"]),
+                    "matched_inventory_products": int(catalog["matched_inventory_products"]),
+                    "matched_with_cbm": int(catalog["matched_with_cbm"]),
+                    "proposed_items": len(items),
+                    "proposed_fob_usd": float(totals["fob_usd"]),
+                    "proposed_landed_cost_usd": float(totals["landed_cost_usd"]),
+                    "recoverable_vat_cash_usd": float(
+                        totals["recoverable_import_vat_cash_usd"]
+                    ),
+                    "proposed_cbm": float(totals["total_cbm"]),
+                    "container_utilization_percent": float(
+                        purchase["container_utilization_percent"]
+                    ),
+                    "stockout_risks": sum(
+                        row["severity"] in {"critical", "high"}
+                        for row in report["products"]
+                    ),
+                },
+                proposals=proposals,
+                evidence=[{"foreign_trade_report": report}],
+                warnings=list(purchase["warnings"]),
+            )
+
         if task.action == "review_inventory_readiness":
             catalog_count = int(task.payload.get("catalog_count", 0))
             stock_known = int(task.payload.get("stock_known", 0))

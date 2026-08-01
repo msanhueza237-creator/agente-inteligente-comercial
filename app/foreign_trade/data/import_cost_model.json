@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "currency": "USD",
+  "reference": {
+    "dispatch": "49194",
+    "supplier_reference": "F/HZ25CF484 LIFEN_2",
+    "source_documents": [
+      "Solc de fondos 49194.pdf",
+      "TDC10 - HZ25CF484.pdf"
+    ],
+    "verified_at": "2026-07-31",
+    "fob_usd": 51962.83,
+    "international_freight_usd": 2000.0,
+    "insurance_usd": 181.21,
+    "cif_usd": 54144.04,
+    "total_cbm": 50.46,
+    "gross_weight_kg": 8443.0,
+    "customs_duty_clp": 255713,
+    "import_vat_clp": 9353911,
+    "local_expenses_net_clp": 997688,
+    "agency_fees_net_clp": 195905,
+    "reference_exchange_rate_clp_usd": 904.14
+  },
+  "derived_rates": {
+    "freight_usd_per_cbm": 39.6354,
+    "insurance_percent_fob": 0.3487,
+    "customs_duty_percent_cif": 0.5223,
+    "local_and_agency_usd_per_cbm": 26.1656,
+    "fallback_nonrecoverable_cost_percent_fob": 7.2824,
+    "import_vat_percent": 19.0
+  },
+  "accounting_policy": {
+    "recoverable_import_vat_is_landed_cost": false,
+    "recoverable_import_vat_is_cash_requirement": true,
+    "estimate_basis": "historical_actual_import",
+    "notes": [
+      "El IVA de importacion se informa como necesidad de caja recuperable y no se suma al costo puesto en bodega.",
+      "Flete, seguro, derechos, gastos locales netos y honorarios netos se distribuyen por m3 o por FOB segun la evidencia disponible."
+    ]
+  }
+}

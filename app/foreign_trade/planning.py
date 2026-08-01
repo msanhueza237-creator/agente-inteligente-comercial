@@ -13,7 +13,7 @@ class LeadTimePolicy:
     customs_delay_days: int = 5
     safety_stock_days: int = 30
     review_period_days: int = 30
-    target_coverage_days: int = 155
+    target_coverage_days: int = 150
     factory_shutdown_months: tuple[int, ...] = (2,)
 
 
