@@ -9,6 +9,7 @@ from app.foreign_trade.planning import ForeignTradePlanner, InventoryPosition
 from app.hub.agents.base import BusinessAgent
 from app.hub.commercial import build_commercial_report
 from app.hub.contracts import ActionProposal, AgentResult, HubTask, ProposalKind
+from app.hub.marketing import build_marketing_report
 
 
 class CommercialAgent(BusinessAgent):
@@ -79,6 +80,77 @@ class CommercialAgent(BusinessAgent):
 
 class MarketingAgent(BusinessAgent):
     async def execute(self, task: HubTask) -> AgentResult:
+        snapshot = [
+            row for row in task.payload.get("commercial_snapshot", []) if isinstance(row, dict)
+        ]
+        companies = [
+            row for row in task.payload.get("crm_companies", []) if isinstance(row, dict)
+        ]
+        inventory = [
+            row for row in task.payload.get("inventory_snapshot", []) if isinstance(row, dict)
+        ]
+        if snapshot or companies:
+            financial_snapshot = task.payload.get("financial_snapshot")
+            commercial_report = build_commercial_report(
+                snapshot,
+                companies,
+                financial_snapshot if isinstance(financial_snapshot, dict) else None,
+            )
+            business_context = task.payload.get("business_context")
+            marketing_report = build_marketing_report(
+                commercial_report,
+                inventory,
+                business_context if isinstance(business_context, dict) else None,
+                as_of=task.payload.get("as_of"),
+            )
+            proposals = [
+                ActionProposal(
+                    kind=ProposalKind.campaign_draft,
+                    title=f"Campaña para revisar: {brief['name']}",
+                    summary=(
+                        f"{brief['audience']['count']} clientes y "
+                        f"{brief['product']['available_units'] if brief.get('product') else 0} "
+                        "unidades de stock respaldan este borrador. No se enviará automáticamente."
+                    ),
+                    payload={
+                        "source_agent": "marketing",
+                        "campaign_brief_id": brief["id"],
+                        "segment_id": brief["audience"]["segment_id"],
+                        "segment_name": brief["audience"]["segment_name"],
+                        "channel": brief["channel"],
+                        "priority": brief["priority"],
+                        "customer_keys": brief["audience"]["customer_keys"],
+                        "company_ids": brief["audience"]["company_ids"],
+                        "product": brief.get("product"),
+                        "subject": brief["subject"],
+                        "email_body": brief["email_body"],
+                        "whatsapp_body": brief["whatsapp_body"],
+                        "cta": brief["cta"],
+                        "benefit": brief["benefit"],
+                    },
+                    risk_level="medium",
+                )
+                for brief in marketing_report["campaign_briefs"]
+            ]
+            report_metrics = marketing_report["metrics"]
+            return AgentResult(
+                summary=(
+                    f"Plan de marketing preparado con {report_metrics['campaign_briefs']} campañas, "
+                    f"{report_metrics['contactable']} clientes contactables y "
+                    f"{report_metrics['products_eligible']} productos con stock elegible. "
+                    "Todas las propuestas permanecen en borrador hasta revisión humana."
+                ),
+                metrics=report_metrics,
+                proposals=proposals,
+                evidence=[{"marketing_report": marketing_report}],
+                warnings=[
+                    "No se aplicaron descuentos ni beneficios no autorizados.",
+                    "Meta WhatsApp debe permanecer deshabilitado hasta completar su aprobación."
+                ],
+            )
+
+        # Backwards-compatible minimal draft for integrations that still send
+        # the original segment/channel payload without synchronized evidence.
         segment = str(task.payload.get("segment", "sin segmento"))
         proposal = ActionProposal(
             kind=ProposalKind.campaign_draft,
