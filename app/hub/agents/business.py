@@ -393,6 +393,7 @@ class ForeignTradeAgent(BusinessAgent):
                 as_of=date.fromisoformat(raw_as_of),
             )
             catalog = report["catalog"]
+            active_imports = report.get("active_imports", [])
             purchase = report["purchase_proposal"]
             totals = purchase["totals"]
             items = purchase["items"]
@@ -421,6 +422,16 @@ class ForeignTradeAgent(BusinessAgent):
                 f"con {catalog['products']} referencias de importacion; "
                 f"{catalog['matched_with_cbm']} coincidencias tienen volumen unitario. "
             )
+            if active_imports:
+                active_lines = sum(len(item.get("items", [])) for item in active_imports)
+                active_fob = sum(
+                    float((item.get("totals") or {}).get("fob_usd", 0))
+                    for item in active_imports
+                )
+                summary += (
+                    f"Hay {len(active_imports)} importacion activa con {active_lines} partidas "
+                    f"y USD {active_fob:.2f} FOB confirmados en produccion. "
+                )
             if items:
                 summary += (
                     f"La propuesta consolidada contiene {len(items)} productos por "
@@ -452,6 +463,14 @@ class ForeignTradeAgent(BusinessAgent):
                     "stockout_risks": sum(
                         row["severity"] in {"critical", "high"}
                         for row in report["products"]
+                    ),
+                    "active_imports": len(active_imports),
+                    "active_import_lines": sum(
+                        len(item.get("items", [])) for item in active_imports
+                    ),
+                    "active_import_fob_usd": sum(
+                        float((item.get("totals") or {}).get("fob_usd", 0))
+                        for item in active_imports
                     ),
                 },
                 proposals=proposals,

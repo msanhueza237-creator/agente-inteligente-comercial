@@ -2,7 +2,11 @@ from datetime import date
 
 import pytest
 
-from app.foreign_trade.catalog import build_foreign_trade_report, load_import_catalog
+from app.foreign_trade.catalog import (
+    build_foreign_trade_report,
+    load_active_imports,
+    load_import_catalog,
+)
 from app.hub.agents.registry import AgentRegistry
 from app.hub.contracts import AgentType, HubTask
 
@@ -16,6 +20,40 @@ def test_import_catalog_preserves_product_volume_evidence() -> None:
         item.get("unit_cbm") and item.get("source_document")
         for item in catalog["items"]
     )
+
+
+def test_active_import_tracks_full_proforma_and_timeline() -> None:
+    payload = load_active_imports()
+    active = payload["imports"][0]
+
+    assert active["order_number"] == "26TDC12"
+    assert len(active["items"]) == 149
+    assert active["totals"]["fob_usd"] == pytest.approx(58940.52)
+    assert active["totals"]["total_cbm"] == pytest.approx(25.49)
+    assert active["timeline"]["production_end_date"] == "2026-09-11"
+    assert active["timeline"]["estimated_warehouse_date"] == "2026-10-31"
+
+
+def test_active_import_is_confirmed_inbound_not_available_stock() -> None:
+    report = build_foreign_trade_report(
+        [
+            {
+                "sku": "ST-351",
+                "name": "BRAND SUPER STARS ST-351",
+                "available_units": 0,
+                "average_daily_demand": 1,
+            }
+        ],
+        as_of=date(2026, 7, 31),
+    )
+    product = report["products"][0]
+
+    assert product["available_units"] == 0
+    assert product["active_import_inbound_units"] == 100
+    assert product["confirmed_inbound_units"] == 100
+    assert product["recommended_units"] < 150
+    assert report["active_imports"][0]["status"] == "in_production"
+    assert report["active_imports"][0]["estimated_costs"]["landed_cost_usd"] > 58940.52
 
 
 def test_import_report_separates_recoverable_vat_from_landed_cost() -> None:

@@ -4,7 +4,7 @@ import json
 import math
 import re
 import unicodedata
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -49,6 +49,13 @@ def load_import_catalog() -> dict[str, Any]:
 
 def load_import_cost_model() -> dict[str, Any]:
     return json.loads((DATA_DIR / "import_cost_model.json").read_text(encoding="utf-8"))
+
+
+def load_active_imports() -> dict[str, Any]:
+    path = DATA_DIR / "active_imports.json"
+    if not path.exists():
+        return {"schema_version": 1, "imports": [], "sources": []}
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _match_catalog_item(
@@ -151,7 +158,23 @@ def build_foreign_trade_report(
     planner = ForeignTradePlanner()
     catalog_payload = load_import_catalog()
     cost_model = load_import_cost_model()
+    active_import_payload = load_active_imports()
     catalog = [item for item in catalog_payload.get("items", []) if isinstance(item, dict)]
+    active_imports = [
+        item for item in active_import_payload.get("imports", []) if isinstance(item, dict)
+    ]
+    active_items = [
+        {
+            **item,
+            "supplier": active_import.get("supplier"),
+            "order_number": active_import.get("order_number"),
+            "source_document": (active_import.get("source") or {}).get("file"),
+            "source_row": item.get("line_number"),
+        }
+        for active_import in active_imports
+        for item in active_import.get("items", [])
+        if isinstance(item, dict)
+    ]
     rates = cost_model["derived_rates"]
     projected_arrival = planner.projected_arrival(as_of)
     demand_multiplier = Decimal("1.25") if projected_arrival.month in planner.high_season_months else Decimal("1")
@@ -161,6 +184,14 @@ def build_foreign_trade_report(
         item, match_score, match_method = _match_catalog_item(product, catalog)
         if item is None:
             continue
+        active_item, active_match_score, active_match_method = _match_catalog_item(
+            product, active_items
+        )
+        active_inbound_units = (
+            int(_decimal(active_item.get("quantity"))) if active_item is not None else 0
+        )
+        source_inbound_units = int(_decimal(product.get("confirmed_inbound_units")))
+        confirmed_inbound_units = source_inbound_units + active_inbound_units
         available = int(_decimal(product.get("available_units")))
         demand = _decimal(product.get("average_daily_demand"))
         unit_fob = _decimal(item.get("unit_fob_usd"))
@@ -172,7 +203,7 @@ def build_foreign_trade_report(
                 sku=str(product.get("sku") or item.get("sku") or item.get("name")),
                 available_units=available,
                 committed_units=int(_decimal(product.get("committed_units"))),
-                confirmed_inbound_units=int(_decimal(product.get("confirmed_inbound_units"))),
+                confirmed_inbound_units=confirmed_inbound_units,
                 average_daily_demand=demand,
                 unit_cost_usd=unit_fob,
             ),
@@ -191,6 +222,11 @@ def build_foreign_trade_report(
                 "name": product.get("name") or item.get("name"),
                 "supplier": item.get("supplier"),
                 "available_units": available,
+                "confirmed_inbound_units": confirmed_inbound_units,
+                "active_import_inbound_units": active_inbound_units,
+                "active_import_orders": [active_item.get("order_number")] if active_item else [],
+                "active_import_match_score": round(active_match_score, 3) if active_item else 0,
+                "active_import_match_method": active_match_method if active_item else "unmatched",
                 "average_daily_demand": float(demand),
                 "coverage_days": round(coverage_days, 1) if coverage_days is not None else None,
                 "recommended_units": units,
@@ -267,6 +303,42 @@ def build_foreign_trade_report(
         )
     warnings.append("El IVA de importacion se informa como necesidad de caja recuperable y no como costo del inventario.")
 
+    active_import_reports: list[dict[str, Any]] = []
+    for active_import in active_imports:
+        production_start = date.fromisoformat(str(active_import["production_start_date"]))
+        production_end = production_start + timedelta(days=planner.policy.production_days)
+        port_arrival = production_end + timedelta(days=planner.policy.sea_travel_days)
+        warehouse_arrival = port_arrival + timedelta(days=planner.policy.customs_delay_days)
+        elapsed_production_days = max(
+            0, min(planner.policy.production_days, (as_of - production_start).days)
+        )
+        active_totals = active_import.get("totals") or {}
+        estimated_costs = _landed_cost(
+            unit_fob=_decimal(active_totals.get("fob_usd")),
+            unit_cbm=_decimal(active_totals.get("total_cbm")),
+            quantity=1,
+            rates=rates,
+        )
+        active_import_reports.append(
+            {
+                **active_import,
+                "timeline": {
+                    "production_days": planner.policy.production_days,
+                    "sea_travel_days": planner.policy.sea_travel_days,
+                    "customs_days": planner.policy.customs_delay_days,
+                    "production_end_date": production_end.isoformat(),
+                    "estimated_port_arrival_date": port_arrival.isoformat(),
+                    "estimated_warehouse_date": warehouse_arrival.isoformat(),
+                    "elapsed_production_days": elapsed_production_days,
+                    "remaining_total_days": max(0, (warehouse_arrival - as_of).days),
+                    "production_progress_percent": round(
+                        elapsed_production_days / planner.policy.production_days * 100, 1
+                    ),
+                },
+                "estimated_costs": estimated_costs,
+            }
+        )
+
     return {
         "generated_at": as_of.isoformat(),
         "policy": {
@@ -305,6 +377,7 @@ def build_foreign_trade_report(
             ],
         },
         "historical_cost_reference": cost_model,
+        "active_imports": active_import_reports,
         "demand_multiplier": float(demand_multiplier),
         "projected_arrival_date": projected_arrival.isoformat(),
         "products": evaluated,
@@ -329,6 +402,8 @@ def build_foreign_trade_report(
         },
         "methodology": (
             "Cruce exacto por SKU y, en segundo termino, similitud de nombre. La demanda proviene de ventas Facto; "
-            "el volumen y FOB provienen de documentos Chinafore; los costos logisticos usan el despacho real 49194."
+            "el volumen y FOB provienen de documentos Chinafore; los costos logisticos usan el despacho real 49194. "
+            "La proforma 26TDC12 se considera mercaderia confirmada en produccion y descuenta necesidad futura, "
+            "pero no incrementa el stock disponible antes de su recepcion en bodega."
         ),
     }
