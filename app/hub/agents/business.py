@@ -388,13 +388,27 @@ class ForeignTradeAgent(BusinessAgent):
                     ],
                 )
             raw_as_of = str(task.payload.get("as_of") or date.today().isoformat())
+            freight_invoices = [
+                row
+                for row in task.payload.get("freight_invoices", [])
+                if isinstance(row, dict)
+            ]
+            customs_cost_references = [
+                row
+                for row in task.payload.get("customs_cost_references", [])
+                if isinstance(row, dict)
+            ]
             report = build_foreign_trade_report(
                 products,
                 as_of=date.fromisoformat(raw_as_of),
+                freight_invoices=freight_invoices,
+                customs_cost_references=customs_cost_references,
             )
             catalog = report["catalog"]
             active_imports = report.get("active_imports", [])
             purchase = report["purchase_proposal"]
+            freight_reference = purchase.get("freight_reference") or {}
+            customs_reference = report.get("customs_cost_reference", {}).get("summary", {})
             totals = purchase["totals"]
             items = purchase["items"]
             proposals: list[ActionProposal] = []
@@ -432,6 +446,18 @@ class ForeignTradeAgent(BusinessAgent):
                     f"Hay {len(active_imports)} importacion activa con {active_lines} partidas "
                     f"y USD {active_fob:.2f} FOB confirmados en produccion. "
                 )
+            if freight_reference.get("latest_source") == "crm_facto_purchase_invoice":
+                summary += (
+                    "El flete se valorizo con la factura AD/ADS Cargas "
+                    f"{freight_reference.get('latest_invoice_number') or 'sin folio'} del "
+                    f"{freight_reference.get('latest_invoice_date') or 'dia sincronizado'}, "
+                    "almacenada en el CRM por Facto. "
+                )
+            summary += (
+                "Los demas costos se contrastan con "
+                f"{customs_reference.get('verified_documents', 0)} documentos historicos de Agencia "
+                "Rodriguez Palma en Gmail; son referencias variables y requieren validacion por despacho. "
+            )
             if items:
                 summary += (
                     f"La propuesta consolidada contiene {len(items)} productos por "
@@ -471,6 +497,18 @@ class ForeignTradeAgent(BusinessAgent):
                     "active_import_fob_usd": sum(
                         float((item.get("totals") or {}).get("fob_usd", 0))
                         for item in active_imports
+                    ),
+                    "freight_invoice_candidates": int(
+                        freight_reference.get("crm_invoice_candidates") or 0
+                    ),
+                    "freight_usable_invoices": int(
+                        freight_reference.get("crm_usable_invoices") or 0
+                    ),
+                    "freight_reference_usd": float(
+                        freight_reference.get("latest_verified_usd") or 0
+                    ),
+                    "customs_reference_documents": int(
+                        customs_reference.get("verified_documents") or 0
                     ),
                 },
                 proposals=proposals,

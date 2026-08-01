@@ -7,6 +7,8 @@ from app.foreign_trade.catalog import (
     load_active_imports,
     load_freight_history,
     load_import_catalog,
+    resolve_customs_cost_references,
+    resolve_freight_history,
 )
 from app.hub.agents.registry import AgentRegistry
 from app.hub.contracts import AgentType, HubTask
@@ -31,6 +33,130 @@ def test_freight_reference_uses_latest_verified_ads_20gp_invoice() -> None:
     assert freight["container_policy"]["planning_capacity_cbm"] == pytest.approx(28)
     assert freight["summary"]["latest_invoice_number"] == "1702"
     assert freight["summary"]["latest_verified_usd"] == pytest.approx(3400)
+
+
+def test_freight_reference_prefers_ad_cargas_invoice_synced_from_crm() -> None:
+    freight = resolve_freight_history(
+        [
+            {
+                "issuer_legal_name": "AD CARGAS INTERNACIONAL SPA",
+                "folio": "2044",
+                "issue_date": "2026-07-25",
+                "currency_code": "USD",
+                "net_amount": 4100,
+                "description": "Flete internacional maritimo 20GP Ningbo - San Antonio",
+                "crm_external_id": "facto-purchase-2044",
+                "crm_resource": "purchase_document_details",
+                "crm_updated_at": "2026-07-26T10:30:00Z",
+            }
+        ]
+    )
+
+    summary = freight["summary"]
+    assert summary["latest_invoice_number"] == "2044"
+    assert summary["latest_invoice_date"] == "2026-07-25"
+    assert summary["latest_verified_usd"] == pytest.approx(4100)
+    assert summary["latest_source"] == "crm_facto_purchase_invoice"
+    assert summary["fallback_used"] is False
+    assert summary["crm_invoice_candidates"] == 1
+    assert summary["crm_usable_invoices"] == 1
+    assert freight["crm_facto_candidates"][0]["source"]["provider"] == "facto"
+
+
+def test_freight_reference_keeps_auditable_fallback_for_unusable_crm_invoice() -> None:
+    freight = resolve_freight_history(
+        [
+            {
+                "issuer_name": "ADS Internacional Cargo SpA",
+                "folio": "2050",
+                "issue_date": "2026-07-30",
+                "currency_code": "CLP",
+                "net_amount": 3_800_000,
+            }
+        ]
+    )
+
+    summary = freight["summary"]
+    assert summary["latest_invoice_number"] == "1702"
+    assert summary["latest_verified_usd"] == pytest.approx(3400)
+    assert summary["fallback_used"] is True
+    assert summary["crm_invoice_candidates"] == 1
+    assert summary["crm_usable_invoices"] == 0
+
+
+def test_import_report_values_freight_with_crm_facto_invoice() -> None:
+    report = build_foreign_trade_report(
+        [
+            {
+                "sku": "ST-351",
+                "name": "BRAND SUPER STARS ST-351",
+                "available_units": 0,
+                "average_daily_demand": 1,
+            }
+        ],
+        as_of=date(2026, 7, 31),
+        freight_invoices=[
+            {
+                "issuer_legal_name": "AD CARGAS INTERNACIONAL SPA",
+                "folio": "2044",
+                "issue_date": "2026-07-25",
+                "currency": "USD",
+                "net_amount": 4100,
+            }
+        ],
+    )
+
+    proposal = report["purchase_proposal"]
+    assert proposal["totals"]["freight_usd"] == pytest.approx(4100)
+    assert proposal["freight_reference"]["latest_invoice_number"] == "2044"
+    assert proposal["freight_reference"]["latest_source"] == "crm_facto_purchase_invoice"
+
+
+def test_customs_cost_references_use_agency_domain_and_are_never_fixed_tariffs() -> None:
+    references = resolve_customs_cost_references(
+        [
+            {
+                "message_id": "gmail-new",
+                "from": "operaciones@agenciarodriguezpalma.cl",
+                "subject": "Solicitud de fondos despacho 52000",
+                "date": "2026-08-01",
+                "attachment_name": "Solicitud fondos 52000.pdf",
+                "dispatch": "52000",
+            },
+            {
+                "message_id": "ignored",
+                "from": "otro@proveedor.cl",
+                "subject": "Tarifa fija",
+            },
+        ]
+    )
+
+    assert references["summary"]["latest_dispatch"] == "52000"
+    assert references["summary"]["reference_contact"] == "j.rodriguez@agenciarodriguezpalma.cl"
+    assert references["summary"]["fixed_tariff"] is False
+    assert references["summary"]["costs_are_variable"] is True
+    assert all(row["message_id"] != "ignored" for row in references["verified_email_documents"])
+
+
+def test_customs_cost_references_keep_all_gmail_attachment_names() -> None:
+    references = resolve_customs_cost_references(
+        [
+            {
+                "gmail_message_id": "gmail-attachments",
+                "from": "contable@agenciarodriguezpalma.cl",
+                "subject": "Factura y cuenta corriente despacho 51590",
+                "date": "2026-07-31T15:20:00Z",
+                "attachment_names": ["FACTURA 26286.pdf", "CTA CTE 51590.pdf"],
+            }
+        ]
+    )
+
+    document = next(
+        row
+        for row in references["verified_email_documents"]
+        if row["message_id"] == "gmail-attachments"
+    )
+    assert document["attachments"] == ["FACTURA 26286.pdf", "CTA CTE 51590.pdf"]
 
 
 def test_active_import_tracks_full_proforma_and_timeline() -> None:

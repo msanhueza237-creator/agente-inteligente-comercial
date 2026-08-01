@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "reference_policy": {
+    "contact_email": "j.rodriguez@agenciarodriguezpalma.cl",
+    "accepted_domain": "agenciarodriguezpalma.cl",
+    "usage": "historical_reference_only",
+    "fixed_tariff": false,
+    "costs_are_variable": true,
+    "accepted_documents": [
+      "invoice",
+      "request_for_funds",
+      "agency_current_account"
+    ],
+    "required_traceability": [
+      "email_date",
+      "dispatch",
+      "sender",
+      "subject",
+      "attachment",
+      "message_id"
+    ],
+    "note": "Los importes son antecedentes historicos del despacho correspondiente. Deben actualizarse con la factura o solicitud de fondos vigente y nunca se consideran tarifas fijas."
+  },
+  "verified_email_documents": [
+    {
+      "message_id": "19fba2dc77f99986",
+      "email_date": "2026-07-31",
+      "sender": "contable@agenciarodriguezpalma.cl",
+      "reference_contact": "j.rodriguez@agenciarodriguezpalma.cl",
+      "subject": "FACTURA N°26286 // DESP.:51590 // AVISO DE LLEGADA BL LE00SH260600181H",
+      "dispatch": "51590",
+      "document_type": "invoice",
+      "attachments": [
+        "FACTURA N°26286.pdf",
+        "CTA CTE IMPORT. LATIN CHILE.pdf"
+      ],
+      "source": "gmail_verified"
+    },
+    {
+      "message_id": "19f624eada2d65a6",
+      "email_date": "2026-07-14",
+      "sender": "operaciones2@agenciarodriguezpalma.cl",
+      "reference_contact": "j.rodriguez@agenciarodriguezpalma.cl",
+      "subject": "RE: SOLICITUD DE FONDOS // DESP.:51590 // AVISO DE LLEGADA BL LE00SH260600181H",
+      "dispatch": "51590",
+      "document_type": "request_for_funds",
+      "attachments": [
+        "Solc de fondos 51590.pdf"
+      ],
+      "source": "gmail_verified"
+    },
+    {
+      "message_id": "19ebda4ce59f947a",
+      "email_date": "2026-06-12",
+      "sender": "operaciones2@agenciarodriguezpalma.cl",
+      "reference_contact": "j.rodriguez@agenciarodriguezpalma.cl",
+      "subject": "SOLICITUD DE FONDOS CORREGIDA // DESP.:51082",
+      "dispatch": "51082",
+      "document_type": "request_for_funds",
+      "attachments": [
+        "Solc de fondos 51082 Mod.pdf"
+      ],
+      "source": "gmail_verified",
+      "corrected_document": true
+    }
+  ]
+}

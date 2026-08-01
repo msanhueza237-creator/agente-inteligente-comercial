@@ -4,7 +4,8 @@ import json
 import math
 import re
 import unicodedata
-from datetime import date, timedelta
+from copy import deepcopy
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -15,6 +16,23 @@ from app.foreign_trade.planning import ForeignTradePlanner, InventoryPosition
 
 DATA_DIR = Path(__file__).with_name("data")
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+FREIGHT_PROVIDER_ALIASES = (
+    "ad cargas internacional",
+    "ads cargas internacional",
+    "ads internacional cargo",
+    "adscargas",
+)
+FREIGHT_TEXT_MARKERS = (
+    "flete internacional",
+    "flete maritimo",
+    "ocean freight",
+    "freight",
+    "20gp",
+    "20 pie",
+    "20pies",
+)
+CUSTOMS_REFERENCE_CONTACT = "j.rodriguez@agenciarodriguezpalma.cl"
+CUSTOMS_REFERENCE_DOMAIN = "agenciarodriguezpalma.cl"
 
 
 def _decimal(value: Any) -> Decimal:
@@ -60,6 +78,329 @@ def load_active_imports() -> dict[str, Any]:
 
 def load_freight_history() -> dict[str, Any]:
     return json.loads((DATA_DIR / "ads_freight_history.json").read_text(encoding="utf-8"))
+
+
+def load_customs_cost_references() -> dict[str, Any]:
+    return json.loads(
+        (DATA_DIR / "customs_cost_references.json").read_text(encoding="utf-8")
+    )
+
+
+def _walk_mappings(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from _walk_mappings(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _walk_mappings(nested)
+
+
+def _first_nested(document: dict[str, Any], *keys: str) -> Any:
+    mappings = list(_walk_mappings(document))
+    for key in keys:
+        for mapping in mappings:
+            value = mapping.get(key)
+            if value not in (None, "") and not isinstance(value, (dict, list)):
+                return value
+    return None
+
+
+def _supplier_name(document: dict[str, Any]) -> str:
+    return str(
+        _first_nested(
+            document,
+            "issuer_legal_name",
+            "issuer_name",
+            "supplier_legal_name",
+            "supplier_name",
+            "provider_name",
+            "vendor_name",
+            "razon_social_emisor",
+            "razon_social",
+            "business_name",
+            "name",
+        )
+        or ""
+    ).strip()
+
+
+def _is_ad_cargas_document(document: dict[str, Any]) -> bool:
+    supplier = _plain(_supplier_name(document))
+    if any(alias in supplier for alias in FREIGHT_PROVIDER_ALIASES):
+        return True
+    searchable = _plain(json.dumps(document, ensure_ascii=False, default=str))
+    return "adscargas cl" in searchable or any(
+        alias in searchable for alias in FREIGHT_PROVIDER_ALIASES
+    )
+
+
+def _parse_invoice_date(value: Any) -> date | None:
+    text = str(value or "").strip()[:10]
+    if not text:
+        return None
+    for pattern in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _invoice_date(document: dict[str, Any]) -> date | None:
+    return _parse_invoice_date(
+        _first_nested(
+            document,
+            "issue_date",
+            "emission_date",
+            "invoice_date",
+            "document_date",
+            "fecha_emision",
+            "fecha",
+            "receive_date",
+            "crm_updated_at",
+        )
+    )
+
+
+def _invoice_number(document: dict[str, Any]) -> str:
+    value = _first_nested(
+        document,
+        "folio",
+        "invoice_number",
+        "document_number",
+        "reference_number",
+        "number",
+        "document_id",
+        "crm_external_id",
+        "id",
+    )
+    return str(value or "sin_folio").strip()
+
+
+def _currency_code(document: dict[str, Any]) -> str:
+    value = _first_nested(
+        document,
+        "currency_code",
+        "currency",
+        "currency_iso",
+        "moneda",
+        "currency_name",
+    )
+    return str(value or "").strip().upper()
+
+
+def _freight_amount_usd(document: dict[str, Any]) -> tuple[Decimal, str]:
+    explicit_usd = _decimal(
+        _first_nested(
+            document,
+            "freight_usd",
+            "ocean_freight_usd",
+            "international_freight_usd",
+            "amount_usd",
+            "total_usd",
+            "net_usd",
+        )
+    )
+    if explicit_usd > 0:
+        return explicit_usd, "explicit_usd"
+
+    currency = _currency_code(document)
+    net_amount = _decimal(
+        _first_nested(
+            document,
+            "net_amount",
+            "net_total",
+            "subtotal",
+            "monto_neto",
+            "amount",
+            "total_amount",
+            "total",
+        )
+    )
+    if net_amount <= 0:
+        return Decimal("0"), "amount_missing"
+    if currency in {"USD", "US$", "DOLAR", "DOLARES", "DOLLAR", "DOLLARS"}:
+        return net_amount, "document_currency_usd"
+
+    exchange_rate = _decimal(
+        _first_nested(
+            document,
+            "usd_clp_exchange_rate",
+            "exchange_rate_usd_clp",
+            "exchange_rate",
+            "tipo_cambio",
+        )
+    )
+    if currency in {"CLP", "PESO", "PESOS", "$"} and exchange_rate > 0:
+        return net_amount / exchange_rate, "document_clp_with_exchange_rate"
+    return Decimal("0"), "currency_or_exchange_rate_missing"
+
+
+def resolve_freight_history(
+    freight_invoices: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Prioriza facturas AD/ADS Cargas de Facto y conserva el historico como respaldo."""
+    history = deepcopy(load_freight_history())
+    historical = [
+        {**row, "evidence_source": "historical_verified"}
+        for row in history.get("verified_ocean_freight", [])
+        if isinstance(row, dict)
+    ]
+    crm_candidates: list[dict[str, Any]] = []
+    for document in freight_invoices or []:
+        if not isinstance(document, dict) or not _is_ad_cargas_document(document):
+            continue
+        amount_usd, conversion_basis = _freight_amount_usd(document)
+        issued_at = _invoice_date(document)
+        searchable = _plain(json.dumps(document, ensure_ascii=False, default=str))
+        crm_candidates.append(
+            {
+                "invoice_number": _invoice_number(document),
+                "invoice_date": issued_at.isoformat() if issued_at else None,
+                "route": str(_first_nested(document, "route", "lane", "ruta") or history.get("lane") or ""),
+                "container_type": str(
+                    _first_nested(document, "container_type", "container", "tipo_contenedor")
+                    or (history.get("container_policy") or {}).get("type")
+                    or "20GP"
+                ),
+                "amount_usd": _round(amount_usd) if amount_usd > 0 else None,
+                "currency": _currency_code(document) or None,
+                "conversion_basis": conversion_basis,
+                "freight_description_confirmed": any(marker in searchable for marker in FREIGHT_TEXT_MARKERS),
+                "supplier": _supplier_name(document),
+                "evidence_source": "crm_facto_purchase_invoice",
+                "source": {
+                    "system": "crm",
+                    "provider": "facto",
+                    "resource": document.get("crm_resource") or "purchase_document",
+                    "external_id": document.get("crm_external_id"),
+                    "synced_at": document.get("crm_updated_at"),
+                },
+            }
+        )
+
+    usable_crm = [
+        row for row in crm_candidates if row.get("invoice_date") and row.get("amount_usd")
+    ]
+    historical.sort(key=lambda row: str(row.get("invoice_date") or ""))
+    usable_crm.sort(key=lambda row: str(row.get("invoice_date") or ""))
+    verified = [*historical, *usable_crm]
+    verified.sort(
+        key=lambda row: (
+            str(row.get("invoice_date") or ""),
+            row.get("evidence_source") == "crm_facto_purchase_invoice",
+        )
+    )
+    # Una factura sincronizada desde Facto es la evidencia operativa vigente del
+    # CRM. El historico curado solo se usa cuando el CRM aun no entrega una
+    # factura de AD/ADS Cargas valorizable y fechada.
+    latest = usable_crm[-1] if usable_crm else (historical[-1] if historical else {})
+    amounts = [float(row["amount_usd"]) for row in verified if row.get("amount_usd")]
+    latest_source = str(latest.get("evidence_source") or "historical_verified")
+    history["verified_ocean_freight"] = verified
+    history["crm_facto_candidates"] = crm_candidates
+    history["summary"] = {
+        "latest_invoice_number": latest.get("invoice_number"),
+        "latest_invoice_date": latest.get("invoice_date"),
+        "latest_verified_usd": float(latest.get("amount_usd") or 0),
+        "latest_provider": latest.get("supplier") or (history.get("provider") or {}).get("name"),
+        "latest_source": latest_source,
+        "historical_min_usd": min(amounts) if amounts else 0,
+        "historical_max_usd": max(amounts) if amounts else 0,
+        "historical_average_usd": round(sum(amounts) / len(amounts), 2) if amounts else 0,
+        "crm_invoice_candidates": len(crm_candidates),
+        "crm_usable_invoices": len(usable_crm),
+        "fallback_used": latest_source != "crm_facto_purchase_invoice",
+        "selection_basis": (
+            "latest_usable_ad_cargas_invoice_from_crm_facto"
+            if latest_source == "crm_facto_purchase_invoice"
+            else "latest_verified_historical_invoice"
+        ),
+    }
+    history["selection_policy"] = "crm_facto_ad_cargas_first_then_verified_history"
+    return history
+
+
+def _is_agency_rodriguez_reference(document: dict[str, Any]) -> bool:
+    searchable = str(json.dumps(document, ensure_ascii=False, default=str)).lower()
+    return CUSTOMS_REFERENCE_DOMAIN in searchable or CUSTOMS_REFERENCE_CONTACT in searchable
+
+
+def resolve_customs_cost_references(
+    email_documents: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Consolida evidencia Gmail de Agencia Rodriguez Palma sin fijar tarifas futuras."""
+    payload = deepcopy(load_customs_cost_references())
+    documents = [
+        row
+        for row in payload.get("verified_email_documents", [])
+        if isinstance(row, dict)
+    ]
+    by_key = {
+        str(row.get("message_id") or f"{row.get('email_date')}:{row.get('subject')}"): row
+        for row in documents
+    }
+    for row in email_documents or []:
+        if not isinstance(row, dict) or not _is_agency_rodriguez_reference(row):
+            continue
+        message_id = str(
+            _first_nested(
+                row,
+                "message_id",
+                "gmail_message_id",
+                "external_id",
+                "crm_external_id",
+                "id",
+            )
+            or ""
+        ).strip()
+        email_date = _parse_invoice_date(
+            _first_nested(row, "email_date", "date", "received_at", "sent_at", "crm_updated_at")
+        )
+        raw_attachments = row.get("attachment_names") or row.get("attachments")
+        if isinstance(raw_attachments, list):
+            attachments = [
+                str(item).strip()
+                for item in raw_attachments
+                if str(item or "").strip()
+            ]
+        else:
+            attachment = _first_nested(row, "attachment", "attachment_name", "filename")
+            attachments = [str(attachment).strip()] if attachment else []
+        normalized = {
+            "message_id": message_id or f"gmail:{len(by_key) + 1}",
+            "email_date": email_date.isoformat() if email_date else None,
+            "sender": str(_first_nested(row, "sender", "from", "from_") or "").strip(),
+            "reference_contact": CUSTOMS_REFERENCE_CONTACT,
+            "subject": str(_first_nested(row, "subject") or "").strip(),
+            "dispatch": str(_first_nested(row, "dispatch", "despacho") or "").strip() or None,
+            "document_type": str(
+                _first_nested(row, "document_type", "type") or "supporting_document"
+            ).strip(),
+            "attachments": attachments,
+            "source": "crm_gmail_sync",
+            "crm_resource": row.get("crm_resource"),
+            "crm_updated_at": row.get("crm_updated_at"),
+        }
+        by_key[normalized["message_id"]] = normalized
+
+    verified = list(by_key.values())
+    verified.sort(key=lambda row: str(row.get("email_date") or ""), reverse=True)
+    policy = payload.get("reference_policy") or {}
+    payload["verified_email_documents"] = verified
+    payload["summary"] = {
+        "verified_documents": len(verified),
+        "latest_email_date": verified[0].get("email_date") if verified else None,
+        "latest_dispatch": verified[0].get("dispatch") if verified else None,
+        "latest_subject": verified[0].get("subject") if verified else None,
+        "reference_contact": policy.get("contact_email") or CUSTOMS_REFERENCE_CONTACT,
+        "accepted_domain": policy.get("accepted_domain") or CUSTOMS_REFERENCE_DOMAIN,
+        "usage": "historical_reference_only",
+        "fixed_tariff": False,
+        "costs_are_variable": True,
+    }
+    return payload
 
 
 def _match_catalog_item(
@@ -192,13 +533,18 @@ def _consolidated_costs(
 
 
 def build_foreign_trade_report(
-    products: list[dict[str, Any]], *, as_of: date | None = None
+    products: list[dict[str, Any]],
+    *,
+    as_of: date | None = None,
+    freight_invoices: list[dict[str, Any]] | None = None,
+    customs_cost_references: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     as_of = as_of or date.today()
     planner = ForeignTradePlanner()
     catalog_payload = load_import_catalog()
     cost_model = load_import_cost_model()
-    freight_history = load_freight_history()
+    freight_history = resolve_freight_history(freight_invoices)
+    customs_references = resolve_customs_cost_references(customs_cost_references)
     active_import_payload = load_active_imports()
     catalog = [item for item in catalog_payload.get("items", []) if isinstance(item, dict)]
     active_imports = [
@@ -333,6 +679,24 @@ def build_foreign_trade_report(
         else "no_purchase"
     )
     warnings: list[str] = []
+    freight_summary = freight_history.get("summary") or {}
+    if freight_summary.get("fallback_used"):
+        if freight_summary.get("crm_invoice_candidates"):
+            warnings.append(
+                "Se encontraron facturas AD/ADS Cargas en el CRM, pero ninguna trae fecha, moneda USD "
+                "o tipo de cambio suficiente para valorizar el flete; se mantiene la ultima referencia "
+                "historica verificada."
+            )
+        else:
+            warnings.append(
+                "No hay una factura AD/ADS Cargas utilizable en el CRM para este corte; se mantiene "
+                "la ultima referencia historica verificada."
+            )
+    warnings.append(
+        "Seguro, derechos, gastos locales y honorarios de agencia son referencias historicas variables. "
+        "Antes de aprobar una compra se deben validar contra la factura o solicitud de fondos vigente de "
+        "Agencia Rodriguez Palma en Gmail."
+    )
     if totals["fob_usd"] and totals["fob_usd"] < float(planner.target_po_min_usd):
         warnings.append("La orden consolidada queda bajo USD 50.000 y requiere justificacion comercial.")
     if projected_arrival.month in planner.high_season_months:
@@ -440,6 +804,7 @@ def build_foreign_trade_report(
             ],
         },
         "historical_cost_reference": cost_model,
+        "customs_cost_reference": customs_references,
         "freight_reference": freight_history,
         "active_imports": active_import_reports,
         "demand_multiplier": float(demand_multiplier),
@@ -467,8 +832,12 @@ def build_foreign_trade_report(
         },
         "methodology": (
             "Cruce exacto por SKU y, en segundo termino, similitud de nombre. La demanda proviene de ventas Facto; "
-            "el volumen y FOB provienen de documentos Chinafore; el flete maritimo usa la ultima factura ADS "
-            "verificada para un 20GP y los demas costos logisticos conservan el despacho real 49194. "
+            "el volumen y FOB provienen de documentos Chinafore; el flete maritimo usa primero la factura mas "
+            "reciente de AD/ADS Cargas almacenada en el CRM por Facto y solo recurre al historico verificado "
+            "cuando esa evidencia no permite una valorizacion USD auditable. Seguro, derechos, gastos locales "
+            "y honorarios usan como referencia historica las facturas y solicitudes de fondos fechadas de "
+            "Agencia Rodriguez Palma encontradas en Gmail, con j.rodriguez@agenciarodriguezpalma.cl como "
+            "contacto de referencia. Esos importes son variables por despacho y nunca se tratan como tarifas fijas. "
             "La proforma 26TDC12 se considera mercaderia confirmada en produccion y descuenta necesidad futura, "
             "pero no incrementa el stock disponible antes de su recepcion en bodega."
         ),

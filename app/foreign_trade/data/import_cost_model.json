@@ -32,10 +32,15 @@
   "accounting_policy": {
     "recoverable_import_vat_is_landed_cost": false,
     "recoverable_import_vat_is_cash_requirement": true,
-    "estimate_basis": "latest_verified_ads_20gp_freight_plus_historical_actual_import",
+    "estimate_basis": "latest_crm_facto_ad_cargas_freight_plus_variable_agencia_rodriguez_palma_references",
+    "customs_reference_contact": "j.rodriguez@agenciarodriguezpalma.cl",
+    "customs_reference_domain": "agenciarodriguezpalma.cl",
+    "customs_costs_are_fixed_tariffs": false,
     "notes": [
       "El IVA de importacion se informa como necesidad de caja recuperable y no se suma al costo puesto en bodega.",
-      "El flete base del contenedor 20GP usa la ultima factura ADS verificada; seguro, derechos, gastos locales netos y honorarios netos conservan la referencia del despacho 49194.",
+      "El flete base del contenedor 20GP usa primero la ultima factura AD/ADS Cargas disponible en el CRM por Facto.",
+      "Seguro, derechos, gastos locales netos y honorarios netos usan facturas y solicitudes de fondos historicas de Agencia Rodriguez Palma encontradas en Gmail, con Jorge Rodriguez como contacto de referencia.",
+      "Los costos de Agencia Rodriguez Palma varian por despacho: deben actualizarse con la factura o solicitud vigente y nunca se consideran tarifas fijas.",
       "Para comparar productos, el flete se asigna por m3; el total consolidado reconoce el costo completo de cada contenedor requerido."
     ]
   }
