@@ -43,6 +43,54 @@ async def test_marketing_agent_only_creates_approval_proposal() -> None:
     assert result.proposals[0].requires_approval is True
 
 
+async def test_executive_morning_brief_is_always_deliverable() -> None:
+    result = await AgentRegistry().get(AgentType.executive).execute(
+        HubTask(
+            id="task-executive-morning",
+            agent_type=AgentType.executive,
+            action="analyze_company",
+            payload={"mode": "morning", "signals": {}},
+        )
+    )
+
+    assert result.metrics["notification_required"] is True
+    assert result.metrics["is_morning"] is True
+    assert result.metrics["alerts"] == 0
+    assert result.evidence[0]["executive_brief"]["mode"] == "morning"
+
+
+async def test_executive_review_only_notifies_for_relevant_signals() -> None:
+    quiet = await AgentRegistry().get(AgentType.executive).execute(
+        HubTask(
+            id="task-executive-quiet",
+            agent_type=AgentType.executive,
+            action="analyze_company",
+            payload={"mode": "review", "signals": {}},
+        )
+    )
+    relevant = await AgentRegistry().get(AgentType.executive).execute(
+        HubTask(
+            id="task-executive-relevant",
+            agent_type=AgentType.executive,
+            action="analyze_company",
+            payload={
+                "mode": "review",
+                "signals": {
+                    "sales": [{"folio": "1001", "total": 119000}],
+                    "campaign_replies": [{"from": "+56911111111", "message": "Me interesa"}],
+                },
+            },
+        )
+    )
+
+    assert quiet.metrics["notification_required"] is False
+    assert quiet.proposals == []
+    assert relevant.metrics["notification_required"] is True
+    assert relevant.metrics["new_sales"] == 1
+    assert relevant.metrics["campaign_replies"] == 1
+    assert relevant.proposals[0].requires_approval is True
+
+
 async def test_finance_agent_uses_facto_snapshot_and_marks_missing_sources() -> None:
     result = await AgentRegistry().get(AgentType.finance).execute(
         HubTask(

@@ -715,9 +715,114 @@ class ForeignTradeAgent(BusinessAgent):
 
 class ExecutiveAgent(BusinessAgent):
     async def execute(self, task: HubTask) -> AgentResult:
-        alerts = list(task.payload.get("alerts", []))
+        mode = str(task.payload.get("mode") or "manual")
+        signals = task.payload.get("signals")
+        if not isinstance(signals, dict):
+            signals = {}
+
+        def rows(name: str) -> list[dict]:
+            value = signals.get(name, [])
+            return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+        sales = rows("sales")
+        stockouts = rows("stockouts")
+        opportunities = rows("opportunities")
+        campaign_replies = rows("campaign_replies")
+        agent_updates = rows("agent_updates")
+        integration_errors = rows("integration_errors")
+        is_morning = mode == "morning"
+        relevant_count = sum(
+            len(items)
+            for items in (
+                sales,
+                stockouts,
+                opportunities,
+                campaign_replies,
+                agent_updates,
+                integration_errors,
+            )
+        )
+        notification_required = is_morning or relevant_count > 0
+
+        section_specs = (
+            ("sales", "Ventas nuevas", sales, "Ventas registradas desde el ultimo corte."),
+            ("stockouts", "Riesgos de stock", stockouts, "Quiebres o coberturas que requieren revision."),
+            ("opportunities", "Oportunidades de negocio", opportunities, "Propuestas preparadas por los agentes."),
+            ("campaign_replies", "Respuestas de clientes", campaign_replies, "Respuestas recibidas desde campanas."),
+            ("agent_updates", "Novedades de los agentes", agent_updates, "Analisis nuevos terminados por el equipo digital."),
+            ("integration_errors", "Salud de integraciones", integration_errors, "Conexiones que requieren atencion."),
+        )
+        sections = [
+            {
+                "key": key,
+                "title": title,
+                "count": len(items),
+                "summary": summary,
+                "items": items[:15],
+            }
+            for key, title, items, summary in section_specs
+        ]
+
+        recommendations: list[str] = []
+        if campaign_replies:
+            recommendations.append("Priorizar hoy las respuestas de clientes y asignar seguimiento comercial.")
+        if stockouts:
+            recommendations.append("Revisar reposicion y cobertura antes de comprometer nuevas ventas.")
+        if opportunities:
+            recommendations.append("Revisar las propuestas pendientes; ninguna se ejecutara sin aprobacion humana.")
+        if integration_errors:
+            recommendations.append("Restablecer las integraciones observadas para evitar decisiones con datos incompletos.")
+        if not recommendations:
+            recommendations.append("Mantener monitoreo; no se detectaron decisiones urgentes en este corte.")
+
+        headline = (
+            f"Resumen diario con {relevant_count} novedades observadas."
+            if is_morning
+            else f"Corte gerencial con {relevant_count} novedades relevantes."
+            if relevant_count
+            else "Corte gerencial sin novedades que justifiquen una notificacion."
+        )
+        brief = {
+            "generated_at": task.payload.get("generated_at"),
+            "mode": mode,
+            "headline": headline,
+            "overall_status": "attention" if stockouts or integration_errors else "stable",
+            "sections": sections,
+            "recommendations": recommendations,
+            "delivery": task.payload.get("delivery", {}),
+            "context": task.payload.get("context", {}),
+        }
+
+        proposals: list[ActionProposal] = []
+        if stockouts or campaign_replies or integration_errors:
+            proposals.append(
+                ActionProposal(
+                    kind=ProposalKind.executive_alert,
+                    title="Revision gerencial prioritaria",
+                    summary=headline,
+                    payload={
+                        "stockouts": stockouts[:20],
+                        "campaign_replies": campaign_replies[:20],
+                        "integration_errors": integration_errors[:20],
+                    },
+                    risk_level="high" if stockouts or integration_errors else "medium",
+                    requires_approval=True,
+                )
+            )
         return AgentResult(
-            summary=f"Resumen ejecutivo preparado con {len(alerts)} alertas prioritarias.",
-            metrics={"alerts": len(alerts)},
-            evidence=[{"alert": alert} for alert in alerts[:20]],
+            summary=headline,
+            metrics={
+                "alerts": relevant_count,
+                "new_sales": len(sales),
+                "stockouts": len(stockouts),
+                "opportunities": len(opportunities),
+                "campaign_replies": len(campaign_replies),
+                "agent_updates": len(agent_updates),
+                "integration_errors": len(integration_errors),
+                "notification_required": notification_required,
+                "is_morning": is_morning,
+            },
+            proposals=proposals,
+            evidence=[{"executive_brief": brief}],
+            warnings=[] if notification_required else ["No hubo novedades relevantes; no se enviara correo automatico."],
         )

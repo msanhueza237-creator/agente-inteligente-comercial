@@ -219,6 +219,36 @@ class HubCRMPort:
                 ),
             )
 
+    async def schedule_executive(
+        self,
+        *,
+        slot_key: str,
+        scheduled_for: str,
+        slot_kind: str,
+    ) -> dict:
+        payload = {
+            "slot_key": slot_key,
+            "scheduled_for": scheduled_for,
+            "slot_kind": slot_kind,
+        }
+        response = await self._request(
+            "POST",
+            "hub/executive/schedule",
+            payload=payload,
+            idempotency_key=self._stable_key(slot_key, "executive-schedule", payload),
+        )
+        return self._data(response)
+
+    async def dispatch_executive_notifications(self) -> dict:
+        # A fresh key lets the CRM claim the next pending notification.  The
+        # database guarantees that each task/channel is delivered once.
+        response = await self._request(
+            "POST",
+            "hub/executive/dispatch",
+            payload={"requested_at": str(uuid.uuid4())},
+        )
+        return self._data(response)
+
     @staticmethod
     def _stable_key(resource_id: str, action: str, payload: dict) -> str:
         # The CRM currently hashes the parsed JSON preserving key insertion

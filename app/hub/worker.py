@@ -5,7 +5,8 @@ import hashlib
 import json
 import logging
 import time
-from datetime import date
+from datetime import date, datetime, time as clock_time
+from zoneinfo import ZoneInfo
 
 from app.config import get_settings
 from app.hub.agents import AgentRegistry
@@ -102,11 +103,53 @@ async def run_hub_services(crm: HubCRMPort) -> None:
         ",".join(AgentRegistry().names()),
     )
     integration_task = asyncio.create_task(integration_monitor(crm))
+    executive_task = asyncio.create_task(executive_monitor(crm))
     try:
         await AgentHubWorker(crm, AgentRegistry()).run_forever()
     finally:
         integration_task.cancel()
-        await asyncio.gather(integration_task, return_exceptions=True)
+        executive_task.cancel()
+        await asyncio.gather(integration_task, executive_task, return_exceptions=True)
+
+
+async def executive_monitor(crm: HubCRMPort) -> None:
+    """Schedule and deliver the executive brief in Chilean business hours."""
+
+    chile = ZoneInfo("America/Santiago")
+    slots = (
+        (clock_time(8, 30), "morning"),
+        (clock_time(11, 30), "review"),
+        (clock_time(14, 30), "review"),
+        (clock_time(17, 30), "review"),
+    )
+    while True:
+        try:
+            now = datetime.now(chile)
+            current_time = now.time().replace(tzinfo=None)
+            if clock_time(8, 30) <= current_time < clock_time(20, 0):
+                due = [(slot_time, kind) for slot_time, kind in slots if slot_time <= current_time]
+                # The CRM makes each slot idempotent. Scheduling every due slot
+                # lets a recovered worker rebuild a missed 08:30 brief and any
+                # later reviews without creating duplicates.
+                for slot_time, slot_kind in due:
+                    scheduled = datetime.combine(now.date(), slot_time, tzinfo=chile)
+                    slot_key = f"executive:{scheduled.date().isoformat()}:{slot_time.strftime('%H%M')}"
+                    await crm.schedule_executive(
+                        slot_key=slot_key,
+                        scheduled_for=scheduled.isoformat(),
+                        slot_kind=slot_kind,
+                    )
+                # Notifications are dispatched only inside the agreed window.
+                # A completed review without relevant signals creates no row.
+                for _ in range(5):
+                    dispatch = await crm.dispatch_executive_notifications()
+                    if not dispatch.get("dispatched"):
+                        break
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("executive scheduling or delivery failed")
+        await asyncio.sleep(30)
 
 
 async def integration_monitor(crm: HubCRMPort) -> None:
