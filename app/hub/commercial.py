@@ -772,7 +772,7 @@ def _customer_product_opportunities(
     inventory_snapshot: list[dict[str, Any]],
     *,
     as_of: date,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Correlate exact customer purchase history with current inventory.
 
     A warehouse entry date is not available in the current Facto payload. The
@@ -782,6 +782,7 @@ def _customer_product_opportunities(
 
     inventory_by_sku: dict[str, dict[str, Any]] = {}
     inventory_by_name: dict[str, dict[str, Any]] = {}
+    normalized_inventory: list[tuple[str, dict[str, Any]]] = []
     for item in inventory_snapshot:
         if not isinstance(item, dict):
             continue
@@ -791,10 +792,45 @@ def _customer_product_opportunities(
             inventory_by_sku[sku_key] = item
         if name_key:
             inventory_by_name[name_key] = item
+            normalized_inventory.append((name_key, item))
 
     opportunities: list[dict[str, Any]] = []
+    diagnostics = {
+        "customers_reviewed": len(customers),
+        "customers_with_product_history": 0,
+        "customers_using_legacy_top_products": 0,
+        "purchase_products_reviewed": 0,
+        "inventory_products_reviewed": len(inventory_snapshot),
+        "matched_customer_products": 0,
+        "eligible_opportunities": 0,
+    }
     for customer in customers:
-        for history in customer.get("product_history", []):
+        product_history = [
+            item for item in customer.get("product_history", []) if isinstance(item, dict)
+        ]
+        purchase_recency_scope = "product"
+        if product_history:
+            diagnostics["customers_with_product_history"] += 1
+        else:
+            product_history = [
+                {
+                    **item,
+                    "purchase_events": item.get("purchase_events")
+                    or item.get("documents")
+                    or 1,
+                    "last_purchase_at": customer.get("last_purchase_at"),
+                    "first_purchase_at": customer.get("first_purchase_at"),
+                    "sources": customer.get("sources", []),
+                }
+                for item in customer.get("top_products", [])
+                if isinstance(item, dict)
+            ]
+            if product_history:
+                diagnostics["customers_using_legacy_top_products"] += 1
+                purchase_recency_scope = "customer_proxy"
+
+        diagnostics["purchase_products_reviewed"] += len(product_history)
+        for history in product_history:
             if not isinstance(history, dict):
                 continue
             sku_key = _normalized_text(history.get("sku"))
@@ -804,8 +840,19 @@ def _customer_product_opportunities(
             if inventory is None and name_key:
                 inventory = inventory_by_name.get(name_key)
                 match_method = "exact_normalized_name" if inventory is not None else ""
+            if inventory is None and name_key and len(name_key) >= 8:
+                containment_matches = [
+                    item
+                    for inventory_name, item in normalized_inventory
+                    if len(inventory_name) >= 8
+                    and (name_key in inventory_name or inventory_name in name_key)
+                ]
+                if len(containment_matches) == 1:
+                    inventory = containment_matches[0]
+                    match_method = "unique_name_containment"
             if inventory is None or not inventory.get("stock_known"):
                 continue
+            diagnostics["matched_customer_products"] += 1
 
             available_units = _decimal(inventory.get("available_units"))
             last_customer_purchase = _date(history.get("last_purchase_at"))
@@ -838,11 +885,21 @@ def _customer_product_opportunities(
             priority = "high" if score >= 65 else "medium" if score >= 45 else "normal"
 
             product_name = _text(inventory.get("name") or history.get("name"))
-            reason_parts = [
-                f"{customer.get('name') or customer.get('legal_name') or 'El cliente'} compró {product_name}",
-                f"y su última compra fue hace {customer_lapse} días.",
-                f"Actualmente hay {float(available_units):g} unidades disponibles.",
-            ]
+            customer_name = customer.get("name") or customer.get("legal_name") or "El cliente"
+            if purchase_recency_scope == "product":
+                reason_parts = [
+                    f"{customer_name} compró {product_name}",
+                    f"y su última compra de este producto fue hace {customer_lapse} días.",
+                ]
+            else:
+                reason_parts = [
+                    f"{customer_name} compró {product_name} en su historial disponible.",
+                    f"La última compra observada del cliente fue hace {customer_lapse} días;",
+                    "el análisis histórico no conservó una fecha específica por producto.",
+                ]
+            reason_parts.append(
+                f"Actualmente hay {float(available_units):g} unidades disponibles."
+            )
             if days_without_sale is not None:
                 minimum_label = "al menos " if inactivity_is_minimum else ""
                 reason_parts.append(
@@ -874,9 +931,11 @@ def _customer_product_opportunities(
                     "score": score,
                     "priority": priority,
                     "reason": " ".join(reason_parts),
+                    "purchase_recency_scope": purchase_recency_scope,
                     "inventory_match_method": match_method,
                     "evidence": {
                         "purchase_sources": history.get("sources", []),
+                        "product_purchase_date_available": purchase_recency_scope == "product",
                         "inventory_source": inventory.get("source"),
                         "sales_history_start": inventory.get("sales_history_start"),
                         "sales_history_end": inventory.get("sales_history_end"),
@@ -884,7 +943,7 @@ def _customer_product_opportunities(
                 }
             )
 
-    return sorted(
+    ranked = sorted(
         opportunities,
         key=lambda item: (
             int(item.get("score", 0)),
@@ -893,6 +952,8 @@ def _customer_product_opportunities(
         ),
         reverse=True,
     )[:100]
+    diagnostics["eligible_opportunities"] = len(ranked)
+    return ranked, diagnostics
 
 
 def build_commercial_report(
@@ -1113,10 +1174,12 @@ def build_commercial_report(
         row["opportunity_priority"] = priority
         opportunity_counts[priority] += 1
 
-    customer_product_opportunities = _customer_product_opportunities(
-        customers,
-        inventory_snapshot or [],
-        as_of=today,
+    customer_product_opportunities, product_opportunity_diagnostics = (
+        _customer_product_opportunities(
+            customers,
+            inventory_snapshot or [],
+            as_of=today,
+        )
     )
 
     source_counts = Counter(_text(row.get("source_channel")) for row in customers)
@@ -1405,13 +1468,16 @@ def build_commercial_report(
         "opportunity_counts": dict(opportunity_counts),
         "top_opportunities": top_opportunities,
         "customer_product_opportunities": customer_product_opportunities,
+        "product_opportunity_diagnostics": product_opportunity_diagnostics,
         "facto_ranking": facto_ranking,
         "tiendanube_ranking": tiendanube_ranking,
         "sales_products": sales_products,
         "product_opportunity_methodology": (
-            "Cruce exacto por SKU o nombre normalizado entre las compras del cliente y el "
-            "inventario vigente. Informa dias desde la compra y dias sin venta observada; "
-            "no estima antiguedad en bodega cuando Facto no entrega la fecha de ingreso."
+            "Cruce seguro por SKU, nombre normalizado o una unica coincidencia contenida entre "
+            "las compras del cliente y el inventario vigente. Los analisis nuevos usan la fecha "
+            "real por producto; los historicos anteriores usan la ultima compra general del "
+            "cliente y lo declaran expresamente. Informa dias sin venta observada y no estima "
+            "antiguedad en bodega cuando Facto no entrega la fecha de ingreso."
         ),
         "methodology": (
             "Unión automática sólo por RUT, email o teléfono exactos. "

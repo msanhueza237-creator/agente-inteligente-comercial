@@ -395,7 +395,11 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                             )
             except Exception:  # noqa: BLE001
                 logger.exception("integration status failed provider=%s", provider)
-        if facto_commercial_ready and tiendanube_commercial_ready:
+        facto_commercial_available = settings.facto_enabled and facto_commercial_ready
+        tiendanube_commercial_available = (
+            settings.tiendanube_enabled and tiendanube_commercial_ready
+        )
+        if facto_commercial_available or tiendanube_commercial_available:
             commercial_customers = extract_commercial_snapshot(
                 facto_customers,
                 facto_sales_documents,

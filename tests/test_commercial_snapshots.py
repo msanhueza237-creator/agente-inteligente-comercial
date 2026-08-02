@@ -431,3 +431,54 @@ def test_commercial_report_matches_customer_history_with_slow_inventory() -> Non
     assert opportunity["stock_value"] == 1_200_000
     assert "Camila" in opportunity["reason"]
     assert "199" in opportunity["reason"]
+
+
+def test_build_commercial_report_recovers_legacy_top_products() -> None:
+    report = build_commercial_report(
+        [
+            {
+                "customer_key": "rut:766931049",
+                "name": "Camila",
+                "tax_id": "766931049",
+                "last_purchase_at": "2025-11-01",
+                "first_purchase_at": "2025-05-01",
+                "contactable": True,
+                "sources": ["facto"],
+                "top_products": [
+                    {
+                        "sku": "VAC-04",
+                        "name": "Bomba de vacio 4 CFM",
+                        "units": 2,
+                        "documents": 1,
+                    }
+                ],
+            }
+        ],
+        [],
+        None,
+        [
+            {
+                "sku": "VAC-04",
+                "name": "Bomba de vacio 4 CFM",
+                "stock_known": True,
+                "available_units": 12,
+                "unit_cost_source": 100_000,
+                "cost_currency_code": "CLP",
+                "sales_history_available": True,
+                "last_sale_at": "2026-01-15",
+                "sales_history_start": "2025-01-01",
+                "sales_history_end": "2026-07-31",
+                "source": "facto_read_only",
+            }
+        ],
+        as_of=date(2026, 8, 2),
+    )
+
+    opportunities = report["customer_product_opportunities"]
+    diagnostics = report["product_opportunity_diagnostics"]
+    assert len(opportunities) == 1
+    assert opportunities[0]["purchase_recency_scope"] == "customer_proxy"
+    assert opportunities[0]["evidence"]["product_purchase_date_available"] is False
+    assert diagnostics["customers_using_legacy_top_products"] == 1
+    assert diagnostics["matched_customer_products"] == 1
+    assert diagnostics["eligible_opportunities"] == 1
