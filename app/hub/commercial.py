@@ -391,6 +391,13 @@ def _line_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
         "products",
         "document_items",
         "documentLines",
+        "document_details",
+        "documentDetails",
+        "product_details",
+        "productDetails",
+        "rows",
+        "concepts",
+        "conceptos",
     )
 
 
@@ -493,19 +500,25 @@ def _record_product_activity(
             _find(
                 line,
                 (
+                    "line_description",
+                    "item_description",
+                    "product_description",
+                    "productDescription",
                     "name",
+                    "nombre",
                     "product_name",
                     "description",
                     "descripcion",
                     "detalle",
                     "title",
+                    "glosa",
+                    "concept",
+                    "concepto",
                 ),
                 "product",
                 "item",
             )
         )
-        if not product_name:
-            continue
         quantity = _decimal(
             _find(
                 line,
@@ -522,6 +535,9 @@ def _record_product_activity(
                 line,
                 (
                     "sku",
+                    "product_sku",
+                    "productSku",
+                    "item_sku",
                     "code",
                     "product_code",
                     "codigo",
@@ -534,6 +550,18 @@ def _record_product_activity(
                 "item",
             )
         )
+        source_product_id = _text(
+            _find(
+                line,
+                ("product_id", "productId", "id_producto", "producto_id", "id"),
+                "product",
+                "item",
+            )
+        )
+        if not product_name:
+            product_name = sku or source_product_id
+        if not product_name:
+            continue
         product_units[product_name] = float(
             Decimal(str(product_units.get(product_name, 0))) + quantity
         )
@@ -541,15 +569,16 @@ def _record_product_activity(
         family_units[family] = float(
             Decimal(str(family_units.get(family, 0))) + quantity
         )
-        history_key = (
-            f"sku:{_normalized_text(sku)}"
-            if _normalized_text(sku)
+        history_key = f"sku:{_normalized_text(sku)}" if _normalized_text(sku) else (
+            f"product:{_normalized_text(source_product_id)}"
+            if _normalized_text(source_product_id)
             else f"name:{_normalized_text(product_name)}"
         )
         history = product_history.setdefault(
             history_key,
             {
                 "sku": sku,
+                "source_product_id": source_product_id,
                 "name": product_name,
                 "units": 0.0,
                 "purchase_events": 0,
@@ -562,6 +591,8 @@ def _record_product_activity(
         history["units"] = float(Decimal(str(history.get("units", 0))) + quantity)
         if not history.get("sku") and sku:
             history["sku"] = sku
+        if not history.get("source_product_id") and source_product_id:
+            history["source_product_id"] = source_product_id
         if not history.get("name") and product_name:
             history["name"] = product_name
         event_key = f"{source}:{document_id}" if document_id else ""
@@ -783,6 +814,7 @@ def _customer_product_opportunities(
     """
 
     inventory_by_sku: dict[str, dict[str, Any]] = {}
+    inventory_by_source_product_id: dict[str, dict[str, Any]] = {}
     inventory_by_name: dict[str, dict[str, Any]] = {}
     normalized_inventory: list[tuple[str, dict[str, Any]]] = []
     inventory_by_family: dict[str, list[dict[str, Any]]] = {}
@@ -790,9 +822,12 @@ def _customer_product_opportunities(
         if not isinstance(item, dict):
             continue
         sku_key = _normalized_text(item.get("sku"))
+        source_product_id_key = _normalized_text(item.get("source_product_id"))
         name_key = _normalized_text(item.get("name"))
         if sku_key:
             inventory_by_sku[sku_key] = item
+        if source_product_id_key:
+            inventory_by_source_product_id[source_product_id_key] = item
         if name_key:
             inventory_by_name[name_key] = item
             normalized_inventory.append((name_key, item))
@@ -810,6 +845,11 @@ def _customer_product_opportunities(
         "inventory_products_reviewed": len(inventory_snapshot),
         "matched_customer_products": 0,
         "family_matches": 0,
+        "purchase_products_without_inventory_match": 0,
+        "matched_products_without_stock": 0,
+        "matched_products_out_of_stock": 0,
+        "matched_products_without_purchase_date": 0,
+        "matched_products_recent_purchase": 0,
         "eligible_opportunities": 0,
     }
     for customer in customers:
@@ -842,9 +882,13 @@ def _customer_product_opportunities(
             if not isinstance(history, dict):
                 continue
             sku_key = _normalized_text(history.get("sku"))
+            source_product_id_key = _normalized_text(history.get("source_product_id"))
             name_key = _normalized_text(history.get("name"))
             inventory = inventory_by_sku.get(sku_key) if sku_key else None
             match_method = "exact_sku" if inventory is not None else ""
+            if inventory is None and source_product_id_key:
+                inventory = inventory_by_source_product_id.get(source_product_id_key)
+                match_method = "exact_product_id" if inventory is not None else ""
             if inventory is None and name_key:
                 inventory = inventory_by_name.get(name_key)
                 match_method = "exact_normalized_name" if inventory is not None else ""
@@ -872,16 +916,25 @@ def _customer_product_opportunities(
                     )
                     match_method = "product_family"
                     diagnostics["family_matches"] += 1
-            if inventory is None or not inventory.get("stock_known"):
+            if inventory is None:
+                diagnostics["purchase_products_without_inventory_match"] += 1
                 continue
             diagnostics["matched_customer_products"] += 1
+            if not inventory.get("stock_known"):
+                diagnostics["matched_products_without_stock"] += 1
+                continue
 
             available_units = _decimal(inventory.get("available_units"))
             last_customer_purchase = _date(history.get("last_purchase_at"))
-            if available_units <= 0 or last_customer_purchase is None:
+            if available_units <= 0:
+                diagnostics["matched_products_out_of_stock"] += 1
+                continue
+            if last_customer_purchase is None:
+                diagnostics["matched_products_without_purchase_date"] += 1
                 continue
             customer_lapse = max(0, (as_of - last_customer_purchase).days)
             if customer_lapse < 90:
+                diagnostics["matched_products_recent_purchase"] += 1
                 continue
 
             last_product_sale = _date(inventory.get("last_sale_at"))

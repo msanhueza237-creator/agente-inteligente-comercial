@@ -210,6 +210,14 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
         if sku_value is None:
             continue
         sku = str(sku_value).strip()
+        source_product_id = _first(
+            product,
+            "product_id",
+            "productId",
+            "id_producto",
+            "producto_id",
+            "id",
+        )
         product_skus.add(sku)
         normalized_name = _normalized_text(
             _first(product, "name", "title", "description", "nombre", "descripcion")
@@ -425,6 +433,9 @@ def extract_product_snapshots(products_payload: Any, documents_payload: Any) -> 
                 "external_id": sku,
                 "payload": {
                     "sku": sku,
+                    "source_product_id": str(source_product_id).strip()
+                    if source_product_id is not None
+                    else "",
                     "name": str(
                         _first(
                             product,

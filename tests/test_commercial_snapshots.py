@@ -381,7 +381,8 @@ def test_commercial_report_matches_customer_history_with_slow_inventory() -> Non
                 "details": [
                     {
                         "sku": "VAC-04",
-                        "description": "Bomba de vacio 4 CFM",
+                        # Facto production returns this field name in invoice lines.
+                        "line_description": "Bomba de vacio 4 CFM",
                         "quantity": 2,
                     }
                 ],
@@ -431,6 +432,59 @@ def test_commercial_report_matches_customer_history_with_slow_inventory() -> Non
     assert opportunity["stock_value"] == 1_200_000
     assert "Camila" in opportunity["reason"]
     assert "199" in opportunity["reason"]
+    assert report["product_opportunity_diagnostics"]["purchase_products_without_inventory_match"] == 0
+
+
+def test_commercial_report_matches_facto_line_description_without_sku_by_family() -> None:
+    customers = extract_commercial_snapshot(
+        [],
+        [
+            {
+                "document_id": 502,
+                "receiver_business_name": "Camila",
+                "receiver_tax_id_code": "766931049",
+                "receiver_email": "raisoftspa@gmail.com",
+                "issue_date": "2025-11-01",
+                "net": 5_181_181,
+                "details": [
+                    {
+                        "line_description": "Bomba de vacio tradicional 4 CFM",
+                        "quantity": 2,
+                    }
+                ],
+            }
+        ],
+        [],
+        [],
+        as_of=date(2026, 8, 2),
+    )
+
+    report = build_commercial_report(
+        customers,
+        [],
+        None,
+        [
+            {
+                "sku": "VAC-NEW",
+                "name": "Bomba de vacio inalambrica 4 CFM",
+                "stock_known": True,
+                "available_units": 9,
+                "unit_cost_source": 100_000,
+                "cost_currency_code": "CLP",
+                "sales_history_available": True,
+                "last_sale_at": "2026-01-15",
+                "sales_history_start": "2025-01-01",
+                "sales_history_end": "2026-07-31",
+                "source": "facto_read_only",
+            }
+        ],
+        as_of=date(2026, 8, 2),
+    )
+
+    assert customers[0]["product_history"][0]["name"] == "Bomba de vacio tradicional 4 CFM"
+    assert len(report["customer_product_opportunities"]) == 1
+    assert report["customer_product_opportunities"][0]["customer_name"] == "Camila"
+    assert report["customer_product_opportunities"][0]["inventory_match_method"] == "product_family"
 
 
 def test_build_commercial_report_recovers_legacy_top_products() -> None:
