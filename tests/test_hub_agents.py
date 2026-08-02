@@ -281,3 +281,61 @@ async def test_logistics_agent_prepares_cross_agent_proposals() -> None:
         "campaign_draft",
         "executive_alert",
     }
+
+
+async def test_commercial_automatic_scan_creates_reviewable_repurchase_proposal() -> None:
+    result = await AgentRegistry().get(AgentType.commercial).execute(
+        HubTask(
+            id="task-commercial-radar",
+            agent_type=AgentType.commercial,
+            action="automatic_customer_product_opportunity_scan",
+            payload={
+                "as_of": "2026-08-02",
+                "commercial_snapshot": [
+                    {
+                        "customer_key": "rut:766931049",
+                        "name": "Camila",
+                        "tax_id": "766931049",
+                        "email": "raisoftspa@gmail.com",
+                        "last_purchase_at": "2025-11-01",
+                        "first_purchase_at": "2025-05-01",
+                        "contactable": True,
+                        "sources": ["facto"],
+                        "product_history": [
+                            {
+                                "sku": "VAC-OLD",
+                                "name": "Bomba de vacio 4 CFM antigua",
+                                "units": 2,
+                                "purchase_events": 1,
+                                "last_purchase_at": "2025-11-01",
+                            }
+                        ],
+                    }
+                ],
+                "inventory_snapshot": [
+                    {
+                        "sku": "VAC-NEW",
+                        "name": "Bomba de vacio inalambrica 2 CFM",
+                        "stock_known": True,
+                        "available_units": 18,
+                        "unit_cost_source": 120000,
+                        "cost_currency_code": "CLP",
+                        "sales_history_available": True,
+                        "last_sale_at": "2026-02-01",
+                    }
+                ],
+                "crm_companies": [],
+                "suppressed_opportunity_keys": [],
+            },
+        )
+    )
+
+    assert result.metrics["customer_product_opportunities"] == 1
+    assert len(result.proposals) == 1
+    proposal = result.proposals[0]
+    assert proposal.kind.value == "commercial_follow_up"
+    assert proposal.requires_approval is True
+    assert proposal.payload["automation_key"] == "customer_product_repurchase"
+    assert proposal.payload["product"]["family"] == "Bombas de vacio"
+    assert proposal.payload["product"]["available_units"] == 18
+    assert "Camila" in proposal.title

@@ -104,12 +104,41 @@ async def run_hub_services(crm: HubCRMPort) -> None:
     )
     integration_task = asyncio.create_task(integration_monitor(crm))
     executive_task = asyncio.create_task(executive_monitor(crm))
+    commercial_task = asyncio.create_task(commercial_monitor(crm))
     try:
         await AgentHubWorker(crm, AgentRegistry()).run_forever()
     finally:
         integration_task.cancel()
         executive_task.cancel()
-        await asyncio.gather(integration_task, executive_task, return_exceptions=True)
+        commercial_task.cancel()
+        await asyncio.gather(
+            integration_task,
+            executive_task,
+            commercial_task,
+            return_exceptions=True,
+        )
+
+
+async def commercial_monitor(crm: HubCRMPort) -> None:
+    """Schedule the customer-product opportunity radar without human polling."""
+
+    settings = get_settings()
+    interval_minutes = settings.hub_commercial_auto_analysis_interval_minutes
+    while True:
+        try:
+            if settings.hub_commercial_auto_analysis_enabled:
+                now = datetime.now(ZoneInfo("America/Santiago"))
+                bucket = int(now.timestamp()) // (interval_minutes * 60)
+                await crm.schedule_commercial(
+                    slot_key=f"commercial-opportunity:{bucket}",
+                    scheduled_for=now.isoformat(),
+                    interval_minutes=interval_minutes,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("commercial opportunity scheduling failed")
+        await asyncio.sleep(60)
 
 
 async def executive_monitor(crm: HubCRMPort) -> None:

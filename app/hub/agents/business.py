@@ -44,31 +44,92 @@ class CommercialAgent(BusinessAgent):
             as_of=as_of,
         )
         metrics = report["metrics"]
-        proposals = [
-            ActionProposal(
-                kind=ProposalKind.campaign_draft,
-                title=f"Segmento para revisar: {segment['name']}",
-                summary=(
-                    f"{segment['count']} clientes cumplen reglas trazables. "
-                    "La campana se mantiene como borrador y no enviara mensajes automaticamente."
-                ),
-                payload={
-                    "source_agent": "commercial",
-                    "segment_id": segment["id"],
-                    "segment_name": segment["name"],
-                    "reason": segment["reason"],
-                    "channel": segment["channel"],
-                    "priority": segment["priority"],
-                    "email_count": segment["email_count"],
-                    "whatsapp_count": segment["whatsapp_count"],
-                    "filters": segment["filters"],
-                    "customer_keys": segment["customer_keys"],
-                    "company_ids": segment["company_ids"],
-                },
-                risk_level="medium",
-            )
-            for segment in report["segments"]
-        ]
+        automatic_scan = task.action == "automatic_customer_product_opportunity_scan"
+        if automatic_scan:
+            suppressed = {
+                str(value)
+                for value in task.payload.get("suppressed_opportunity_keys", [])
+                if value
+            }
+            proposals = []
+            seen_keys: set[str] = set()
+            for opportunity in report.get("customer_product_opportunities", []):
+                opportunity_key = ":".join(
+                    (
+                        str(opportunity.get("customer_key") or opportunity.get("tax_id") or "customer"),
+                        str(opportunity.get("product_family") or opportunity.get("sku") or "product"),
+                    )
+                ).lower()
+                if opportunity_key in suppressed or opportunity_key in seen_keys:
+                    continue
+                seen_keys.add(opportunity_key)
+                proposals.append(
+                    ActionProposal(
+                        kind=ProposalKind.commercial_follow_up,
+                        title=f"Oportunidad de recompra: {opportunity.get('customer_name')}",
+                        summary=str(opportunity.get("reason") or "Oportunidad cliente-producto con stock disponible."),
+                        payload={
+                            "source_agent": "commercial",
+                            "automation_key": "customer_product_repurchase",
+                            "opportunity_key": opportunity_key,
+                            "customer": {
+                                "key": opportunity.get("customer_key"),
+                                "company_id": opportunity.get("crm_company_id"),
+                                "name": opportunity.get("customer_name"),
+                                "tax_id": opportunity.get("tax_id"),
+                                "email": opportunity.get("email"),
+                                "phone": opportunity.get("phone"),
+                                "whatsapp": opportunity.get("whatsapp"),
+                            },
+                            "product": {
+                                "name": opportunity.get("product_name"),
+                                "historical_name": opportunity.get("historical_product_name"),
+                                "family": opportunity.get("product_family"),
+                                "sku": opportunity.get("sku"),
+                                "available_units": opportunity.get("available_units"),
+                            },
+                            "score": opportunity.get("score"),
+                            "priority": opportunity.get("priority"),
+                            "reason": opportunity.get("reason"),
+                            "evidence": opportunity.get("evidence"),
+                            "channel": "whatsapp" if opportunity.get("whatsapp") else "email",
+                        },
+                        risk_level="medium",
+                    )
+                )
+                if len(proposals) >= 12:
+                    break
+        else:
+            proposals = [
+                ActionProposal(
+                    kind=ProposalKind.campaign_draft,
+                    title=f"Segmento para revisar: {segment['name']}",
+                    summary=(
+                        f"{segment['count']} clientes cumplen reglas trazables. "
+                        "La campana se mantiene como borrador y no enviara mensajes automaticamente."
+                    ),
+                    payload={
+                        "source_agent": "commercial",
+                        "segment_id": segment["id"],
+                        "segment_name": segment["name"],
+                        "reason": segment["reason"],
+                        "channel": segment["channel"],
+                        "priority": segment["priority"],
+                        "email_count": segment["email_count"],
+                        "whatsapp_count": segment["whatsapp_count"],
+                        "filters": segment["filters"],
+                        "customer_keys": segment["customer_keys"],
+                        "company_ids": segment["company_ids"],
+                    },
+                    risk_level="medium",
+                )
+                for segment in report["segments"]
+            ]
+        proposal_label = (
+            "oportunidades de recompra preparadas"
+            if automatic_scan
+            else "segmentos preparados"
+        )
         return AgentResult(
             summary=(
                 f"Cartera unificada: {metrics['customers']} clientes, "
@@ -77,7 +138,7 @@ class CommercialAgent(BusinessAgent):
                 f"Hay {metrics['customers_at_risk']} clientes en riesgo o inactivos, "
                 f"{metrics['omnichannel_customers']} presentes en ambos canales y "
                 f"{metrics['customer_product_opportunities']} oportunidades cliente-producto "
-                f"con stock verificable, ademas de {len(proposals)} segmentos preparados "
+                f"con stock verificable, ademas de {len(proposals)} {proposal_label} "
                 "para revision humana."
             ),
             metrics=metrics,

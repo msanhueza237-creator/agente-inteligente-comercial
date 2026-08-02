@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     hub_poll_seconds: int = 15
     hub_lease_seconds: int = 120
     hub_heartbeat_seconds: int = 30
+    # Re-run the customer x product radar periodically. It only creates
+    # reviewable CRM proposals; it never sends a campaign automatically.
+    hub_commercial_auto_analysis_enabled: bool = True
+    hub_commercial_auto_analysis_interval_minutes: int = 360
 
     @model_validator(mode="after")
     def production_crm_contract(self) -> "Settings":
@@ -149,6 +153,7 @@ class Settings(BaseSettings):
             self.hub_poll_seconds,
             self.hub_lease_seconds,
             self.hub_heartbeat_seconds,
+            self.hub_commercial_auto_analysis_interval_minutes,
         ) <= 0:
             raise ValueError("Integration and Agent Hub intervals must be positive")
         if self.hub_heartbeat_seconds >= self.hub_lease_seconds:

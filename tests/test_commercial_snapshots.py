@@ -482,3 +482,60 @@ def test_build_commercial_report_recovers_legacy_top_products() -> None:
     assert diagnostics["customers_using_legacy_top_products"] == 1
     assert diagnostics["matched_customer_products"] == 1
     assert diagnostics["eligible_opportunities"] == 1
+
+
+def test_commercial_report_matches_related_products_by_family() -> None:
+    customers = extract_commercial_snapshot(
+        [],
+        [
+            {
+                "document_id": 701,
+                "receiver_business_name": "Camila",
+                "receiver_tax_id_code": "766931049",
+                "receiver_email": "raisoftspa@gmail.com",
+                "issue_date": "2025-11-01",
+                "net": 5_181_181,
+                "details": [
+                    {
+                        "sku": "VAC-OLD",
+                        "description": "Bomba de vacio 4 CFM antigua",
+                        "quantity": 2,
+                    }
+                ],
+            }
+        ],
+        [],
+        [],
+        as_of=date(2026, 8, 2),
+    )
+
+    report = build_commercial_report(
+        customers,
+        [],
+        None,
+        [
+            {
+                "sku": "VAC-NEW",
+                "name": "Bomba de vacío inalámbrica 2 CFM",
+                "stock_known": True,
+                "available_units": 18,
+                "unit_cost_source": 120_000,
+                "cost_currency_code": "CLP",
+                "sales_history_available": True,
+                "last_sale_at": "2026-02-01",
+                "sales_history_start": "2025-01-01",
+                "sales_history_end": "2026-07-31",
+                "source": "facto_read_only",
+            }
+        ],
+        as_of=date(2026, 8, 2),
+    )
+
+    opportunity = report["customer_product_opportunities"][0]
+    diagnostics = report["product_opportunity_diagnostics"]
+    assert opportunity["inventory_match_method"] == "product_family"
+    assert opportunity["product_family"] == "Bombas de vacio"
+    assert opportunity["historical_product_name"] == "Bomba de vacio 4 CFM antigua"
+    assert opportunity["sku"] == "VAC-NEW"
+    assert opportunity["available_units"] == 18
+    assert diagnostics["family_matches"] == 1

@@ -402,10 +402,12 @@ def _product_family(value: Any) -> str:
             ("bomba condensado", "bomba de condensado", "condensate pump"),
         ),
         (
+            "Bombas de vacio",
+            ("bomba vacio", "bomba de vacio", "vacuum pump"),
+        ),
+        (
             "Herramientas HVAC",
             (
-                "bomba vacio",
-                "bomba de vacio",
                 "manifold",
                 "abocardador",
                 "expandidor",
@@ -783,6 +785,7 @@ def _customer_product_opportunities(
     inventory_by_sku: dict[str, dict[str, Any]] = {}
     inventory_by_name: dict[str, dict[str, Any]] = {}
     normalized_inventory: list[tuple[str, dict[str, Any]]] = []
+    inventory_by_family: dict[str, list[dict[str, Any]]] = {}
     for item in inventory_snapshot:
         if not isinstance(item, dict):
             continue
@@ -793,6 +796,10 @@ def _customer_product_opportunities(
         if name_key:
             inventory_by_name[name_key] = item
             normalized_inventory.append((name_key, item))
+            family = _product_family(item.get("name"))
+            if family != "Otros productos HVAC" and item.get("stock_known"):
+                if _decimal(item.get("available_units")) > 0:
+                    inventory_by_family.setdefault(family, []).append(item)
 
     opportunities: list[dict[str, Any]] = []
     diagnostics = {
@@ -802,6 +809,7 @@ def _customer_product_opportunities(
         "purchase_products_reviewed": 0,
         "inventory_products_reviewed": len(inventory_snapshot),
         "matched_customer_products": 0,
+        "family_matches": 0,
         "eligible_opportunities": 0,
     }
     for customer in customers:
@@ -850,6 +858,20 @@ def _customer_product_opportunities(
                 if len(containment_matches) == 1:
                     inventory = containment_matches[0]
                     match_method = "unique_name_containment"
+            historical_product_name = _text(history.get("name"))
+            product_family = _product_family(historical_product_name)
+            if inventory is None and product_family != "Otros productos HVAC":
+                family_candidates = inventory_by_family.get(product_family, [])
+                if family_candidates:
+                    inventory = max(
+                        family_candidates,
+                        key=lambda item: (
+                            _decimal(item.get("stock_value")),
+                            _decimal(item.get("available_units")),
+                        ),
+                    )
+                    match_method = "product_family"
+                    diagnostics["family_matches"] += 1
             if inventory is None or not inventory.get("stock_known"):
                 continue
             diagnostics["matched_customer_products"] += 1
@@ -886,7 +908,13 @@ def _customer_product_opportunities(
 
             product_name = _text(inventory.get("name") or history.get("name"))
             customer_name = customer.get("name") or customer.get("legal_name") or "El cliente"
-            if purchase_recency_scope == "product":
+            if match_method == "product_family":
+                reason_parts = [
+                    f"{customer_name} compró antes productos de la familia {product_family}",
+                    f"({historical_product_name}) y lleva {customer_lapse} días sin recomprar esa familia.",
+                    f"Hoy hay stock de {product_name} para preparar una propuesta relacionada.",
+                ]
+            elif purchase_recency_scope == "product":
                 reason_parts = [
                     f"{customer_name} compró {product_name}",
                     f"y su última compra de este producto fue hace {customer_lapse} días.",
@@ -917,6 +945,8 @@ def _customer_product_opportunities(
                     "phone": customer.get("phone"),
                     "whatsapp": customer.get("whatsapp"),
                     "product_name": product_name,
+                    "historical_product_name": historical_product_name,
+                    "product_family": product_family,
                     "sku": inventory.get("sku") or history.get("sku"),
                     "historical_units": historical_units,
                     "purchase_events": purchase_events,

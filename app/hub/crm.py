@@ -239,6 +239,26 @@ class HubCRMPort:
         )
         return self._data(response)
 
+    async def schedule_commercial(
+        self,
+        *,
+        slot_key: str,
+        scheduled_for: str,
+        interval_minutes: int,
+    ) -> dict:
+        payload = {
+            "slot_key": slot_key,
+            "scheduled_for": scheduled_for,
+            "interval_minutes": interval_minutes,
+        }
+        response = await self._request(
+            "POST",
+            "hub/commercial/schedule",
+            payload=payload,
+            idempotency_key=self._stable_key(slot_key, "commercial-schedule", payload),
+        )
+        return self._data(response)
+
     async def dispatch_executive_notifications(self) -> dict:
         # A fresh key lets the CRM claim the next pending notification.  The
         # database guarantees that each task/channel is delivered once.
