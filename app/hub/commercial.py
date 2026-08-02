@@ -141,8 +141,10 @@ def _blank_customer(customer_key: str) -> dict[str, Any]:
         "purchase_months": {},
         "top_products": [],
         "product_families": [],
+        "product_history": [],
         "_product_units": {},
         "_product_families": {},
+        "_product_history": {},
         "first_purchase_at": None,
         "last_purchase_at": None,
         "source_ids": {},
@@ -473,9 +475,17 @@ def _product_family(value: Any) -> str:
     return "Otros productos HVAC"
 
 
-def _record_product_activity(target: dict[str, Any], payload: dict[str, Any]) -> None:
+def _record_product_activity(
+    target: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    purchase_date: date | None = None,
+    source: str = "",
+    document_id: str = "",
+) -> None:
     product_units = target.setdefault("_product_units", {})
     family_units = target.setdefault("_product_families", {})
+    product_history = target.setdefault("_product_history", {})
     for line in _line_rows(payload):
         product_name = _text(
             _find(
@@ -505,6 +515,23 @@ def _record_product_activity(target: dict[str, Any], payload: dict[str, Any]) ->
         )
         if quantity <= 0:
             quantity = Decimal("1")
+        sku = _text(
+            _find(
+                line,
+                (
+                    "sku",
+                    "code",
+                    "product_code",
+                    "codigo",
+                    "codigo_producto",
+                    "codigoProducto",
+                    "item_code",
+                    "reference",
+                ),
+                "product",
+                "item",
+            )
+        )
         product_units[product_name] = float(
             Decimal(str(product_units.get(product_name, 0))) + quantity
         )
@@ -512,6 +539,50 @@ def _record_product_activity(target: dict[str, Any], payload: dict[str, Any]) ->
         family_units[family] = float(
             Decimal(str(family_units.get(family, 0))) + quantity
         )
+        history_key = (
+            f"sku:{_normalized_text(sku)}"
+            if _normalized_text(sku)
+            else f"name:{_normalized_text(product_name)}"
+        )
+        history = product_history.setdefault(
+            history_key,
+            {
+                "sku": sku,
+                "name": product_name,
+                "units": 0.0,
+                "purchase_events": 0,
+                "first_purchase_at": None,
+                "last_purchase_at": None,
+                "sources": [],
+                "_document_ids": [],
+            },
+        )
+        history["units"] = float(Decimal(str(history.get("units", 0))) + quantity)
+        if not history.get("sku") and sku:
+            history["sku"] = sku
+        if not history.get("name") and product_name:
+            history["name"] = product_name
+        event_key = f"{source}:{document_id}" if document_id else ""
+        observed_documents = history.setdefault("_document_ids", [])
+        if not event_key or event_key not in observed_documents:
+            history["purchase_events"] = int(history.get("purchase_events", 0)) + 1
+            if event_key:
+                observed_documents.append(event_key)
+        if source and source not in history["sources"]:
+            history["sources"].append(source)
+        if purchase_date:
+            first_purchase = _date(history.get("first_purchase_at"))
+            last_purchase = _date(history.get("last_purchase_at"))
+            history["first_purchase_at"] = (
+                min(first_purchase, purchase_date).isoformat()
+                if first_purchase
+                else purchase_date.isoformat()
+            )
+            history["last_purchase_at"] = (
+                max(last_purchase, purchase_date).isoformat()
+                if last_purchase
+                else purchase_date.isoformat()
+            )
 
 
 def extract_commercial_snapshot(
@@ -559,13 +630,20 @@ def extract_commercial_snapshot(
             Decimal(str(target["facto_net_sales"])) + net
         )
         target["facto_documents"] += 1
+        purchase_date = _document_date(document)
         _record_purchase(
             target,
-            _document_date(document),
+            purchase_date,
             source="facto",
             amount=net,
         )
-        _record_product_activity(target, document)
+        _record_product_activity(
+            target,
+            document,
+            purchase_date=purchase_date,
+            source="facto",
+            document_id=document_id,
+        )
 
     for index, row in enumerate(
         payload_rows(tiendanube_customers_payload, "customers", "data", "items")
@@ -593,18 +671,28 @@ def extract_commercial_snapshot(
             + _decimal(_first(order, "total", "total_amount", "subtotal"))
         )
         target["tiendanube_orders"] += 1
+        purchase_date = _date(
+            _first(order, "completed_at", "paid_at", "created_at", "date")
+        )
         _record_purchase(
             target,
-            _date(_first(order, "completed_at", "paid_at", "created_at", "date")),
+            purchase_date,
             source="tiendanube",
             amount=_decimal(_first(order, "total", "total_amount", "subtotal")),
         )
-        _record_product_activity(target, order)
+        _record_product_activity(
+            target,
+            order,
+            purchase_date=purchase_date,
+            source="tiendanube",
+            document_id=order_id,
+        )
 
     rows: list[dict[str, Any]] = []
     for customer in customers.values():
         product_units = customer.pop("_product_units", {})
         family_units = customer.pop("_product_families", {})
+        product_history = customer.pop("_product_history", {})
         customer.pop("_location_priority", None)
         customer["top_products"] = [
             {"name": name, "units": units}
@@ -621,6 +709,21 @@ def extract_commercial_snapshot(
                 key=lambda item: item[1],
                 reverse=True,
             )[:5]
+        ]
+        customer["product_history"] = [
+            {
+                key: value
+                for key, value in history.items()
+                if key != "_document_ids"
+            }
+            for history in sorted(
+                product_history.values(),
+                key=lambda item: (
+                    _date(item.get("last_purchase_at")) or date.min,
+                    Decimal(str(item.get("units", 0))),
+                ),
+                reverse=True,
+            )
         ]
         sources = sorted(customer["sources"])
         last_purchase = _date(customer.get("last_purchase_at"))
@@ -664,13 +767,145 @@ def extract_commercial_snapshot(
     )
 
 
+def _customer_product_opportunities(
+    customers: list[dict[str, Any]],
+    inventory_snapshot: list[dict[str, Any]],
+    *,
+    as_of: date,
+) -> list[dict[str, Any]]:
+    """Correlate exact customer purchase history with current inventory.
+
+    A warehouse entry date is not available in the current Facto payload. The
+    result therefore reports days without an observed sale, never invented
+    days in storage.
+    """
+
+    inventory_by_sku: dict[str, dict[str, Any]] = {}
+    inventory_by_name: dict[str, dict[str, Any]] = {}
+    for item in inventory_snapshot:
+        if not isinstance(item, dict):
+            continue
+        sku_key = _normalized_text(item.get("sku"))
+        name_key = _normalized_text(item.get("name"))
+        if sku_key:
+            inventory_by_sku[sku_key] = item
+        if name_key:
+            inventory_by_name[name_key] = item
+
+    opportunities: list[dict[str, Any]] = []
+    for customer in customers:
+        for history in customer.get("product_history", []):
+            if not isinstance(history, dict):
+                continue
+            sku_key = _normalized_text(history.get("sku"))
+            name_key = _normalized_text(history.get("name"))
+            inventory = inventory_by_sku.get(sku_key) if sku_key else None
+            match_method = "exact_sku" if inventory is not None else ""
+            if inventory is None and name_key:
+                inventory = inventory_by_name.get(name_key)
+                match_method = "exact_normalized_name" if inventory is not None else ""
+            if inventory is None or not inventory.get("stock_known"):
+                continue
+
+            available_units = _decimal(inventory.get("available_units"))
+            last_customer_purchase = _date(history.get("last_purchase_at"))
+            if available_units <= 0 or last_customer_purchase is None:
+                continue
+            customer_lapse = max(0, (as_of - last_customer_purchase).days)
+            if customer_lapse < 90:
+                continue
+
+            last_product_sale = _date(inventory.get("last_sale_at"))
+            history_start = _date(inventory.get("sales_history_start"))
+            days_without_sale: int | None = None
+            inactivity_is_minimum = False
+            if last_product_sale:
+                days_without_sale = max(0, (as_of - last_product_sale).days)
+            elif inventory.get("sales_history_available") and history_start:
+                days_without_sale = max(0, (as_of - history_start).days)
+                inactivity_is_minimum = True
+
+            historical_units = float(_decimal(history.get("units")))
+            purchase_events = int(history.get("purchase_events", 0) or 0)
+            score = min(30, round(customer_lapse / 12))
+            score += min(25, purchase_events * 5 + round(min(historical_units, 50) / 5))
+            score += min(20, 5 + round(min(float(available_units), 150) / 10))
+            if days_without_sale is not None:
+                score += 20 if days_without_sale >= 180 else 12 if days_without_sale >= 90 else 6 if days_without_sale >= 60 else 0
+            if customer.get("contactable"):
+                score += 5
+            score = min(100, score)
+            priority = "high" if score >= 65 else "medium" if score >= 45 else "normal"
+
+            product_name = _text(inventory.get("name") or history.get("name"))
+            reason_parts = [
+                f"{customer.get('name') or customer.get('legal_name') or 'El cliente'} compró {product_name}",
+                f"y su última compra fue hace {customer_lapse} días.",
+                f"Actualmente hay {float(available_units):g} unidades disponibles.",
+            ]
+            if days_without_sale is not None:
+                minimum_label = "al menos " if inactivity_is_minimum else ""
+                reason_parts.append(
+                    f"El producto lleva {minimum_label}{days_without_sale} días sin venta observada."
+                )
+
+            unit_cost = _decimal(inventory.get("unit_cost_source"))
+            opportunities.append(
+                {
+                    "customer_key": customer.get("customer_key"),
+                    "crm_company_id": customer.get("crm_company_id"),
+                    "customer_name": customer.get("name") or customer.get("legal_name"),
+                    "tax_id": customer.get("tax_id"),
+                    "email": customer.get("email"),
+                    "phone": customer.get("phone"),
+                    "whatsapp": customer.get("whatsapp"),
+                    "product_name": product_name,
+                    "sku": inventory.get("sku") or history.get("sku"),
+                    "historical_units": historical_units,
+                    "purchase_events": purchase_events,
+                    "customer_last_purchase_at": last_customer_purchase.isoformat(),
+                    "days_since_customer_product_purchase": customer_lapse,
+                    "available_units": float(available_units),
+                    "product_last_sale_at": last_product_sale.isoformat() if last_product_sale else None,
+                    "days_without_product_sale": days_without_sale,
+                    "inactivity_is_minimum": inactivity_is_minimum,
+                    "stock_value": float(available_units * unit_cost),
+                    "cost_currency_code": inventory.get("cost_currency_code"),
+                    "score": score,
+                    "priority": priority,
+                    "reason": " ".join(reason_parts),
+                    "inventory_match_method": match_method,
+                    "evidence": {
+                        "purchase_sources": history.get("sources", []),
+                        "inventory_source": inventory.get("source"),
+                        "sales_history_start": inventory.get("sales_history_start"),
+                        "sales_history_end": inventory.get("sales_history_end"),
+                    },
+                }
+            )
+
+    return sorted(
+        opportunities,
+        key=lambda item: (
+            int(item.get("score", 0)),
+            int(item.get("days_since_customer_product_purchase", 0)),
+            float(item.get("stock_value", 0)),
+        ),
+        reverse=True,
+    )[:100]
+
+
 def build_commercial_report(
     commercial_snapshot: list[dict[str, Any]],
     crm_companies: list[dict[str, Any]],
     financial_snapshot: dict[str, Any] | None = None,
+    inventory_snapshot: list[dict[str, Any]] | None = None,
+    *,
+    as_of: date | None = None,
 ) -> dict[str, Any]:
     """Enrich the provider portfolio with reviewed CRM classifications."""
 
+    today = as_of or datetime.now(UTC).date()
     customers = [dict(row) for row in commercial_snapshot if isinstance(row, dict)]
     alias_index: dict[str, int] = {}
     for index, customer in enumerate(customers):
@@ -877,6 +1112,12 @@ def build_commercial_report(
         row["recommended_action_label"] = action_labels[action]
         row["opportunity_priority"] = priority
         opportunity_counts[priority] += 1
+
+    customer_product_opportunities = _customer_product_opportunities(
+        customers,
+        inventory_snapshot or [],
+        as_of=today,
+    )
 
     source_counts = Counter(_text(row.get("source_channel")) for row in customers)
     lifecycle_counts = Counter(_text(row.get("lifecycle")) for row in customers)
@@ -1151,6 +1392,7 @@ def build_commercial_report(
                 for row in customers
                 if row.get("email_ready") or row.get("whatsapp_ready")
             ),
+            "customer_product_opportunities": len(customer_product_opportunities),
         },
         "source_counts": dict(source_counts),
         "lifecycle_counts": dict(lifecycle_counts),
@@ -1162,9 +1404,15 @@ def build_commercial_report(
         "segments": segments,
         "opportunity_counts": dict(opportunity_counts),
         "top_opportunities": top_opportunities,
+        "customer_product_opportunities": customer_product_opportunities,
         "facto_ranking": facto_ranking,
         "tiendanube_ranking": tiendanube_ranking,
         "sales_products": sales_products,
+        "product_opportunity_methodology": (
+            "Cruce exacto por SKU o nombre normalizado entre las compras del cliente y el "
+            "inventario vigente. Informa dias desde la compra y dias sin venta observada; "
+            "no estima antiguedad en bodega cuando Facto no entrega la fecha de ingreso."
+        ),
         "methodology": (
             "Unión automática sólo por RUT, email o teléfono exactos. "
             "Facto es la fuente de venta neta; Tiendanube identifica el canal web "

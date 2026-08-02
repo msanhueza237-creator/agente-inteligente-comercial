@@ -29,10 +29,19 @@ class CommercialAgent(BusinessAgent):
             )
 
         financial_snapshot = task.payload.get("financial_snapshot")
+        inventory_snapshot = [
+            row for row in task.payload.get("inventory_snapshot", []) if isinstance(row, dict)
+        ]
+        try:
+            as_of = date.fromisoformat(str(task.payload.get("as_of") or "")[:10])
+        except ValueError:
+            as_of = None
         report = build_commercial_report(
             snapshot,
             companies,
             financial_snapshot if isinstance(financial_snapshot, dict) else None,
+            inventory_snapshot,
+            as_of=as_of,
         )
         metrics = report["metrics"]
         proposals = [
@@ -67,7 +76,9 @@ class CommercialAgent(BusinessAgent):
                 f"{metrics['tiendanube_customers']} vinculados a Climactiva.cl. "
                 f"Hay {metrics['customers_at_risk']} clientes en riesgo o inactivos, "
                 f"{metrics['omnichannel_customers']} presentes en ambos canales y "
-                f"{len(proposals)} segmentos preparados para revision humana."
+                f"{metrics['customer_product_opportunities']} oportunidades cliente-producto "
+                f"con stock verificable, ademas de {len(proposals)} segmentos preparados "
+                "para revision humana."
             ),
             metrics=metrics,
             proposals=proposals,

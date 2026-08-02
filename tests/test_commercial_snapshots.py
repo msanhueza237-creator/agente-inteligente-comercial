@@ -365,3 +365,69 @@ def test_commercial_report_owns_channel_rankings_and_sold_products() -> None:
         "units": 12.0,
         "net_sales": 480_000.0,
     }
+
+
+def test_commercial_report_matches_customer_history_with_slow_inventory() -> None:
+    customers = extract_commercial_snapshot(
+        [],
+        [
+            {
+                "document_id": 501,
+                "receiver_business_name": "Camila",
+                "receiver_tax_id_code": "766931049",
+                "receiver_email": "raisoftspa@gmail.com",
+                "issue_date": "2025-11-01",
+                "net": 5_181_181,
+                "details": [
+                    {
+                        "sku": "VAC-04",
+                        "description": "Bomba de vacio 4 CFM",
+                        "quantity": 2,
+                    }
+                ],
+            }
+        ],
+        [],
+        [],
+        as_of=date(2026, 8, 2),
+    )
+
+    report = build_commercial_report(
+        customers,
+        [],
+        None,
+        [
+            {
+                "sku": "VAC-04",
+                "name": "Bomba de vacio 4 CFM",
+                "stock_known": True,
+                "available_units": 12,
+                "unit_cost_source": 100_000,
+                "cost_currency_code": "CLP",
+                "sales_history_available": True,
+                "last_sale_at": "2026-01-15",
+                "sales_history_start": "2025-01-01",
+                "sales_history_end": "2026-07-31",
+                "source": "facto_read_only",
+            }
+        ],
+        as_of=date(2026, 8, 2),
+    )
+
+    assert customers[0]["product_history"][0]["sku"] == "VAC-04"
+    assert customers[0]["product_history"][0]["purchase_events"] == 1
+    assert customers[0]["product_history"][0]["units"] == 2
+
+    opportunities = report["customer_product_opportunities"]
+    assert report["metrics"]["customer_product_opportunities"] == 1
+    assert len(opportunities) == 1
+    opportunity = opportunities[0]
+    assert opportunity["customer_name"] == "Camila"
+    assert opportunity["sku"] == "VAC-04"
+    assert opportunity["historical_units"] == 2
+    assert opportunity["days_since_customer_product_purchase"] == 274
+    assert opportunity["available_units"] == 12
+    assert opportunity["days_without_product_sale"] == 199
+    assert opportunity["stock_value"] == 1_200_000
+    assert "Camila" in opportunity["reason"]
+    assert "199" in opportunity["reason"]
