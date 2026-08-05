@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     # A task may fan out into several complementary Text Search requests.
     # Place Details remains capped separately to keep the search predictable.
     google_places_queries_per_task: int = 6
+    google_places_pages_per_query: int = 2
     google_places_detail_multiplier: int = 2
 
     # Licensed web search. The key is used only by the Brave API adapter.
@@ -162,6 +163,8 @@ class Settings(BaseSettings):
             raise ValueError("HUB_WORKER_ID cannot be empty")
         if not 1 <= self.google_places_queries_per_task <= 12:
             raise ValueError("GOOGLE_PLACES_QUERIES_PER_TASK must be between 1 and 12")
+        if not 1 <= self.google_places_pages_per_query <= 3:
+            raise ValueError("GOOGLE_PLACES_PAGES_PER_QUERY must be between 1 and 3")
         if not 1 <= self.google_places_detail_multiplier <= 3:
             raise ValueError("GOOGLE_PLACES_DETAIL_MULTIPLIER must be between 1 and 3")
         if not 3 <= self.brave_market_queries_per_region <= 12:

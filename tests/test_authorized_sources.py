@@ -216,6 +216,8 @@ async def test_google_expansion_deduplicates_and_keeps_generic_geo_matches(monke
     assert candidates.metrics == {
         "queries_planned": 6,
         "queries_executed": 6,
+        "search_requests_executed": 6,
+        "pages_per_query_limit": 1,
         "raw_results": 18,
         "unique_results": 3,
         "outside_territory_discovery": 1,
@@ -251,6 +253,103 @@ async def test_google_expansion_deduplicates_and_keeps_generic_geo_matches(monke
         "locations[0].comuna_code",
         "locations[0].address",
     }.issubset(permanent_fields)
+
+
+@pytest.mark.asyncio
+async def test_google_executor_follows_second_search_page(monkeypatch) -> None:
+    address = [
+        {"types": ["administrative_area_level_1"], "longText": "Región Metropolitana de Santiago"},
+        {"types": ["administrative_area_level_3"], "longText": "Santiago"},
+    ]
+
+    class FakeGoogle:
+        page_tokens: list[str | None] = []
+
+        async def text_search_page(self, query, *, max_results, page_token=None):
+            del query, max_results
+            self.page_tokens.append(page_token)
+            if page_token is None:
+                return SimpleNamespace(
+                    places=(
+                        {
+                            "id": "page-one",
+                            "displayName": {"text": "Clima Uno"},
+                            "types": ["air_conditioning_contractor"],
+                            "addressComponents": address,
+                        },
+                    ),
+                    next_page_token="page-two-token",
+                )
+            return SimpleNamespace(
+                places=(
+                    {
+                        "id": "page-two",
+                        "displayName": {"text": "Clima Dos"},
+                        "types": ["air_conditioning_contractor"],
+                        "addressComponents": address,
+                    },
+                ),
+                next_page_token=None,
+            )
+
+        async def get_place_details(self, place_id):
+            return {
+                "id": place_id,
+                "displayName": {"text": "Clima Uno" if place_id == "page-one" else "Clima Dos"},
+                "types": ["air_conditioning_contractor"],
+                "addressComponents": address,
+                "formattedAddress": "Santiago, Chile",
+                "nationalPhoneNumber": "+56 9 1111 1111" if place_id == "page-one" else "+56 9 2222 2222",
+            }
+
+    monkeypatch.setattr("app.prospecting.sources.GooglePlacesClient", FakeGoogle)
+    executor = AuthorizedSourceExecutor()
+    executor.settings = executor.settings.model_copy(
+        update={
+            "google_places_queries_per_task": 1,
+            "google_places_pages_per_query": 2,
+            "google_places_detail_multiplier": 1,
+        }
+    )
+    task = WorkerTask(
+        id="task-pages",
+        run_id="run-pages",
+        source=SourceName.google_places,
+        keyword="tienda de climatizacion",
+        region_code="13",
+        region_name="Metropolitana de Santiago",
+        comuna_code="13101",
+        comuna_name="Santiago",
+        max_results=20,
+        attempt_count=1,
+        max_attempts=3,
+    )
+    snapshot = ProspectingRunSnapshot(
+        crm_run_id="run-pages",
+        campaign_version=1,
+        requested_by="admin",
+        campaign=ProspectingCampaign(
+            crm_campaign_id="campaign-pages",
+            name="Paginada",
+            territories=(
+                Territory(
+                    region_code="13",
+                    region_name="Metropolitana de Santiago",
+                    comuna_code="13101",
+                    comuna_name="Santiago",
+                ),
+            ),
+            keywords=("tienda de climatizacion",),
+            sources=(SourceName.google_places,),
+        ),
+    )
+
+    candidates = await executor.search(task, snapshot)
+
+    assert len(candidates) == 2
+    assert FakeGoogle.page_tokens == [None, "page-two-token"]
+    assert candidates.metrics["search_requests_executed"] == 2
+    assert candidates.metrics["raw_results"] == 2
 
 
 def test_google_query_plan_expands_target_intents_without_duplicates() -> None:
@@ -295,6 +394,48 @@ def test_google_query_plan_expands_target_intents_without_duplicates() -> None:
     assert queries[0].startswith("aire acondicionado en Santiago")
     assert any("tienda de aire acondicionado" in query for query in queries)
     assert any("servicio tecnico de aire acondicionado" in query for query in queries)
+
+
+def test_store_keyword_expansion_does_not_repeat_commercial_lead() -> None:
+    task = WorkerTask(
+        id="task-store",
+        run_id="run-store",
+        source=SourceName.google_places,
+        keyword="tienda de climatizacion",
+        region_code="13",
+        region_name="Metropolitana de Santiago",
+        comuna_code="13101",
+        comuna_name="Santiago",
+        max_results=20,
+        attempt_count=1,
+        max_attempts=3,
+    )
+    snapshot = ProspectingRunSnapshot(
+        crm_run_id="run-store",
+        campaign_version=1,
+        requested_by="admin",
+        campaign=ProspectingCampaign(
+            crm_campaign_id="campaign-store",
+            name="Tiendas HVAC",
+            territories=(
+                Territory(
+                    region_code="13",
+                    region_name="Metropolitana de Santiago",
+                    comuna_code="13101",
+                    comuna_name="Santiago",
+                ),
+            ),
+            keywords=("tienda de climatizacion",),
+            sources=(SourceName.google_places,),
+            target_types=("tienda comercial",),
+        ),
+    )
+
+    queries = build_google_query_plan(task, snapshot, max_queries=8)
+
+    assert queries[0].startswith("tienda de climatizacion en Santiago")
+    assert not any("tienda de tienda" in query.casefold() for query in queries)
+    assert any("repuestos de climatizacion" in query.casefold() for query in queries)
 
 
 def test_market_coverage_query_plan_interleaves_commercial_roles() -> None:

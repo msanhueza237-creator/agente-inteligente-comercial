@@ -65,3 +65,31 @@ async def test_connection_check_returns_safe_status(
     assert result["status"] == status
     assert result["error_code"] == error_code
     assert "secret provider response" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_text_search_page_sends_token_and_reads_continuation() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["request"] = request
+        return httpx.Response(
+            200,
+            json={
+                "places": [{"id": "place-page-2"}],
+                "nextPageToken": "page-3",
+            },
+        )
+
+    client = GooglePlacesClient("secret", transport=httpx.MockTransport(handler))
+    page = await client.text_search_page(
+        "tienda de climatizacion en Santiago, Chile",
+        page_token="page-2",
+    )
+
+    request = seen["request"]
+    assert isinstance(request, httpx.Request)
+    assert json.loads(request.content)["pageToken"] == "page-2"
+    assert "nextPageToken" in request.headers["X-Goog-FieldMask"]
+    assert page.places == ({"id": "place-page-2"},)
+    assert page.next_page_token == "page-3"

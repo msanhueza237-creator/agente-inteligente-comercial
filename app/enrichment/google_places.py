@@ -6,6 +6,8 @@ the main cost-control lever -- see plan section "Scheduler y control de
 costos".
 """
 
+from dataclasses import dataclass
+
 import httpx
 
 from app.config import get_settings
@@ -41,6 +43,12 @@ class GooglePlacesError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class GooglePlacesSearchPage:
+    places: tuple[dict, ...]
+    next_page_token: str | None = None
+
+
 class GooglePlacesClient:
     def __init__(
         self,
@@ -56,8 +64,22 @@ class GooglePlacesClient:
             )
         self.transport = transport
 
-    async def text_search(self, query: str, *, max_results: int = 20) -> list[dict]:
-        """Pro-tier search: cheap, enough to discover + pre-filter candidates."""
+    async def text_search_page(
+        self,
+        query: str,
+        *,
+        max_results: int = 20,
+        page_token: str | None = None,
+    ) -> GooglePlacesSearchPage:
+        """Fetch one Pro-tier Text Search page, including its continuation token."""
+        payload: dict[str, object] = {
+            "textQuery": query,
+            "languageCode": "es",
+            "regionCode": "CL",
+            "pageSize": min(max_results, 20),
+        }
+        if page_token:
+            payload["pageToken"] = page_token
         async with httpx.AsyncClient(
             timeout=15, trust_env=False, transport=self.transport
         ) as client:
@@ -65,21 +87,27 @@ class GooglePlacesClient:
                 f"{PLACES_BASE_URL}/places:searchText",
                 headers={
                     "X-Goog-Api-Key": self.api_key,
-                    "X-Goog-FieldMask": ",".join(f"places.{f}" for f in _PRO_FIELDS),
+                    "X-Goog-FieldMask": ",".join(
+                        [*(f"places.{field}" for field in _PRO_FIELDS), "nextPageToken"]
+                    ),
                     "Content-Type": "application/json",
                 },
-                json={
-                    "textQuery": query,
-                    "languageCode": "es",
-                    "regionCode": "CL",
-                    "pageSize": min(max_results, 20),
-                },
+                json=payload,
             )
         if resp.status_code != 200:
             raise GooglePlacesError(
                 f"Google Places text search failed with status {resp.status_code}"
             )
-        return resp.json().get("places", [])
+        body = resp.json()
+        return GooglePlacesSearchPage(
+            places=tuple(body.get("places", [])),
+            next_page_token=body.get("nextPageToken") or None,
+        )
+
+    async def text_search(self, query: str, *, max_results: int = 20) -> list[dict]:
+        """Backward-compatible first-page search used by older adapters/tests."""
+        page = await self.text_search_page(query, max_results=max_results)
+        return list(page.places)
 
     async def check_connection(self) -> dict[str, object]:
         """Run one minimal Places request without returning provider payloads.

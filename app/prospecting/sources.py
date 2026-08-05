@@ -4,6 +4,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 import json
+import re
 import uuid
 
 import httpx
@@ -78,6 +79,60 @@ _TARGET_QUERY_PREFIXES = {
     "competencia": ("empresa", "proyectos HVAC", "refrigeracion industrial"),
     "otro": ("empresa",),
 }
+
+_COMMERCIAL_QUERY_LEADS = (
+    "tienda de ",
+    "venta de ",
+    "distribuidor de ",
+    "proveedor de ",
+    "empresa de ",
+    "repuestos de ",
+    "insumos de ",
+    "servicio tecnico de ",
+    "servicio de ",
+    "instalacion de ",
+    "mantencion de ",
+    "mantenimiento de ",
+)
+
+
+def _query_subject(keyword: str) -> str:
+    """Remove one commercial lead so query expansion does not repeat it."""
+
+    subject = " ".join(keyword.strip().split())
+    folded = subject.casefold()
+    for lead in _COMMERCIAL_QUERY_LEADS:
+        if folded.startswith(lead) and len(subject) > len(lead):
+            return subject[len(lead) :].strip()
+    return subject
+
+
+def _commercial_query(prefix: str, subject: str, location: str) -> str:
+    folded_prefix = prefix.casefold().strip()
+    connector = "" if folded_prefix.endswith(("hvac", "comerciales")) else " de"
+    return f"{prefix}{connector} {subject} en {location}"
+
+
+def _semantic_hvac_queries(subject: str, location: str) -> tuple[str, ...]:
+    folded = re.sub(r"\s+", " ", subject.casefold()).strip()
+    if any(token in folded for token in ("climat", "aire acondicionado", "hvac", "refrig")):
+        intents = (
+            "equipos de aire acondicionado",
+            "repuestos de climatizacion",
+            "insumos de refrigeracion",
+            "venta de aire acondicionado",
+            "proveedor HVAC",
+            "climatizacion comercial",
+        )
+    else:
+        intents = (
+            f"equipos de {subject}",
+            f"repuestos de {subject}",
+            f"insumos de {subject}",
+            f"venta de {subject}",
+            f"proveedor de {subject}",
+        )
+    return tuple(f"{intent} en {location}" for intent in intents)
 
 _SPECIALTY_LABELS = {
     "aire acondicionado": "aire acondicionado",
@@ -170,7 +225,9 @@ def build_google_query_plan(
     """Expand one CRM task into complementary, deduplicated search intents."""
 
     location = f"{task.comuna_name}, {task.region_name}, Chile"
-    queries = [f"{task.keyword} en {location}"]
+    keyword = " ".join(task.keyword.strip().split())
+    subject = _query_subject(keyword)
+    queries = [f"{keyword} en {location}"]
     # Interleave the commercial roles.  This prevents the first selected
     # target type from consuming the whole request budget and gives one
     # relevant query to distributors, stores and competitors alike.
@@ -181,15 +238,16 @@ def build_google_query_plan(
     for prefix_index in range(max((len(prefixes) for prefixes in role_prefixes), default=0)):
         for prefixes in role_prefixes:
             if prefix_index < len(prefixes):
-                queries.append(f"{prefixes[prefix_index]} de {task.keyword} en {location}")
+                queries.append(_commercial_query(prefixes[prefix_index], subject, location))
+    queries.extend(_semantic_hvac_queries(subject, location))
     queries.extend(
         (
-            f"empresa de {task.keyword} en {location}",
-            f"instalacion de {task.keyword} en {location}",
-            f"mantencion de {task.keyword} en {location}",
-            f"servicio tecnico de {task.keyword} en {location}",
-            f"venta de {task.keyword} en {location}",
-            f"proveedor de {task.keyword} en {location}",
+            f"empresa de {subject} en {location}",
+            f"instalacion de {subject} en {location}",
+            f"mantencion de {subject} en {location}",
+            f"servicio tecnico de {subject} en {location}",
+            f"venta de {subject} en {location}",
+            f"proveedor de {subject} en {location}",
         )
     )
     unique: list[str] = []
@@ -315,50 +373,81 @@ class AuthorizedSourceExecutor:
             max_queries=self.settings.google_places_queries_per_task,
         )
         unique_places: dict[str, dict] = {}
+        place_query_hits: dict[str, int] = {}
+        place_order: dict[str, int] = {}
         raw_results = 0
         queries_executed = 0
+        search_requests_executed = 0
         budget_limited = False
         budget_reason: str | None = None
         budget_alert = False
         run_spend = 0.0
         daily_spend = 0.0
         monthly_spend = 0.0
+        paged_search = getattr(client, "text_search_page", None)
+        page_limit = self.settings.google_places_pages_per_query if callable(paged_search) else 1
         for query in queries:
-            reservation = await self.budget.reserve(
-                run_id=snapshot.crm_run_id,
-                task_id=task.id,
-                query_type=PlacesQueryType.text_search,
-                tier=PlacesFieldTier.pro,
-                region=task.region_name,
-                keyword=task.keyword,
-            )
-            if not reservation.allowed:
-                budget_limited = True
-                budget_reason = reservation.reason
-                break
-            places = await client.text_search(query, max_results=task.max_results)
-            queries_executed += 1
-            await self.budget.complete(reservation, len(places))
-            budget_alert = budget_alert or reservation.alert
-            run_spend = reservation.run_spend_usd
-            daily_spend = reservation.daily_spend_usd
-            monthly_spend = reservation.monthly_spend_usd
-            raw_results += len(places)
-            for place in places:
-                place_id = place.get("id")
-                fallback_key = "|".join(
-                    (
-                        ((place.get("displayName") or {}).get("text") or "").casefold(),
-                        (place.get("formattedAddress") or "").casefold(),
-                    )
+            next_page_token: str | None = None
+            query_keys: set[str] = set()
+            query_started = False
+            for _page_index in range(page_limit):
+                reservation = await self.budget.reserve(
+                    run_id=snapshot.crm_run_id,
+                    task_id=task.id,
+                    query_type=PlacesQueryType.text_search,
+                    tier=PlacesFieldTier.pro,
+                    region=task.region_name,
+                    keyword=task.keyword,
                 )
-                key = place_id or fallback_key
-                if key.strip("|"):
+                if not reservation.allowed:
+                    budget_limited = True
+                    budget_reason = reservation.reason
+                    break
+                if callable(paged_search):
+                    page = await paged_search(
+                        query,
+                        max_results=task.max_results,
+                        page_token=next_page_token,
+                    )
+                    places = list(page.places)
+                    next_page_token = page.next_page_token
+                else:
+                    places = list(await client.text_search(query, max_results=task.max_results))
+                    next_page_token = None
+                if not query_started:
+                    queries_executed += 1
+                    query_started = True
+                search_requests_executed += 1
+                await self.budget.complete(reservation, len(places))
+                budget_alert = budget_alert or reservation.alert
+                run_spend = reservation.run_spend_usd
+                daily_spend = reservation.daily_spend_usd
+                monthly_spend = reservation.monthly_spend_usd
+                raw_results += len(places)
+                for place in places:
+                    place_id = place.get("id")
+                    fallback_key = "|".join(
+                        (
+                            ((place.get("displayName") or {}).get("text") or "").casefold(),
+                            (place.get("formattedAddress") or "").casefold(),
+                        )
+                    )
+                    key = place_id or fallback_key
+                    if not key.strip("|"):
+                        continue
                     unique_places.setdefault(key, place)
+                    place_order.setdefault(key, len(place_order))
+                    if key not in query_keys:
+                        query_keys.add(key)
+                        place_query_hits[key] = place_query_hits.get(key, 0) + 1
+                if not next_page_token:
+                    break
+            if budget_limited:
+                break
 
-        survivors: list[tuple[int, dict]] = []
+        survivors: list[tuple[int, int, int, dict]] = []
         outside_territory = 0
-        for place in unique_places.values():
+        for key, place in unique_places.items():
             name = (place.get("displayName") or {}).get("text") or ""
             discovery_candidate = ProspectCandidate(
                 name=name or "Resultado sin nombre",
@@ -372,8 +461,10 @@ class AuthorizedSourceExecutor:
             # Prefer explicit HVAC signals, but do not discard generic Google
             # categories before Place Details can provide contact information.
             priority = 1 if is_hvac_relevant(discovery_candidate) else 0
-            survivors.append((priority, place))
-        survivors.sort(key=lambda item: item[0], reverse=True)
+            survivors.append(
+                (priority, place_query_hits.get(key, 1), place_order.get(key, 0), place)
+            )
+        survivors.sort(key=lambda item: (-item[0], -item[1], item[2]))
 
         candidates: list[ProspectCandidate] = []
         detail_limit = min(
@@ -381,7 +472,7 @@ class AuthorizedSourceExecutor:
             task.max_results * self.settings.google_places_detail_multiplier,
         )
         details_requested = 0
-        for _priority, place in survivors[:detail_limit]:
+        for _priority, _query_hits, _order, place in survivors[:detail_limit]:
             place_id = place.get("id")
             details = None
             if place_id:
@@ -517,13 +608,15 @@ class AuthorizedSourceExecutor:
             {
                 "queries_planned": len(queries),
                 "queries_executed": queries_executed,
+                "search_requests_executed": search_requests_executed,
+                "pages_per_query_limit": page_limit,
                 "raw_results": raw_results,
                 "unique_results": len(unique_places),
                 "outside_territory_discovery": outside_territory,
                 "details_requested": details_requested,
                 "candidates_prepared": len(candidates),
                 "estimated_google_cost_usd": round(
-                    queries_executed * COST_ESTIMATE_USD["pro"]
+                    search_requests_executed * COST_ESTIMATE_USD["pro"]
                     + details_requested * COST_ESTIMATE_USD["enterprise"],
                     4,
                 ),

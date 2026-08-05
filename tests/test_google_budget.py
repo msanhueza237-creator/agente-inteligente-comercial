@@ -91,6 +91,6 @@ def test_estimate_for_one_hundred_candidate_capacity() -> None:
     assert estimate == {
         "google_tasks": 5,
         "estimated_min_cost_usd": 0.96,
-        "estimated_cost_usd": 2.96,
-        "estimated_max_cost_usd": 4.96,
+        "estimated_cost_usd": 3.92,
+        "estimated_max_cost_usd": 5.92,
     }

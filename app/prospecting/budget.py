@@ -60,14 +60,19 @@ def estimate_google_run(
             "estimated_max_cost_usd": 0.0,
         }
     tasks = len(snapshot.campaign.territories) * len(snapshot.campaign.keywords)
-    search_cost = tasks * settings.google_places_queries_per_task * COST_ESTIMATE_USD["pro"]
+    minimum_search_cost = (
+        tasks
+        * settings.google_places_queries_per_task
+        * COST_ESTIMATE_USD["pro"]
+    )
+    planned_search_cost = minimum_search_cost * settings.google_places_pages_per_query
     expected_details = tasks * snapshot.campaign.max_results_per_task
     maximum_details = expected_details * settings.google_places_detail_multiplier
-    expected = search_cost + expected_details * COST_ESTIMATE_USD["enterprise"]
-    maximum = search_cost + maximum_details * COST_ESTIMATE_USD["enterprise"]
+    expected = planned_search_cost + expected_details * COST_ESTIMATE_USD["enterprise"]
+    maximum = planned_search_cost + maximum_details * COST_ESTIMATE_USD["enterprise"]
     return {
         "google_tasks": tasks,
-        "estimated_min_cost_usd": round(search_cost, 4),
+        "estimated_min_cost_usd": round(minimum_search_cost, 4),
         "estimated_cost_usd": round(min(expected, settings.google_places_run_budget_usd), 4),
         "estimated_max_cost_usd": round(min(maximum, settings.google_places_run_budget_usd), 4),
     }
