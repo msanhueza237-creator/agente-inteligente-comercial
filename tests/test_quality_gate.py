@@ -11,6 +11,7 @@ from app.prospecting.contracts import (
     Territory,
 )
 from app.prospecting.scoring import classify_and_score, infer_target_type
+from app.prospecting.quality import evaluate_hvac_quality
 from app.prospecting.validation import (
     normalize_geo,
     sanitize_unsubstantiated_external_fields,
@@ -42,6 +43,7 @@ def snapshot() -> ProspectingRunSnapshot:
 
 
 def candidate(**updates) -> ProspectCandidate:
+    evidence_provider = updates.pop("_evidence_provider", SourceName.official_website)
     base = {
         "name": "Climatización Andes SpA",
         "website": "https://clima-andes.cl",
@@ -71,6 +73,8 @@ def candidate(**updates) -> ProspectCandidate:
             (field_name, getattr(prospect, field_name))
             for field_name in ("rut", "trade_name", "phone", "email", "website", "description")
         ),
+        ("category", prospect.category),
+        ("specialties", " | ".join(prospect.specialties)),
     ]
     for location in prospect.locations:
         values.extend(
@@ -84,7 +88,7 @@ def candidate(**updates) -> ProspectCandidate:
         )
     evidence = [
         SourceEvidence(
-            provider=SourceName.brave_search,
+            provider=evidence_provider,
             source_url="https://clima-andes.cl",
             field=field_name,
             value=value,
@@ -97,6 +101,220 @@ def candidate(**updates) -> ProspectCandidate:
 
 def test_quality_gate_accepts_only_hvac_geo_contact_with_evidence(snapshot) -> None:
     assert validate_candidate(candidate(), snapshot).accepted
+
+
+@pytest.mark.parametrize(
+    ("name", "description", "expected_type"),
+    [
+        (
+            "Repuestos Clima Sur",
+            "Tienda especializada en venta de repuestos para aire acondicionado",
+            "tienda comercial",
+        ),
+        (
+            "Distribuidora Frio Chile",
+            "Importador mayorista de equipos e insumos HVAC-R",
+            "distribuidor",
+        ),
+        (
+            "Servicio Tecnico Andes",
+            "Instalacion, mantencion y reparacion de aire acondicionado",
+            "tecnico",
+        ),
+        (
+            "Ingenieria Termica Chile",
+            "Empresa de ingenieria y proyectos de climatizacion comercial",
+            "instalador grande",
+        ),
+        (
+            "Frio Industrial Sur",
+            "Empresa de refrigeracion industrial e instalaciones comerciales",
+            "instalador grande",
+        ),
+        (
+            "Contratista Camaras Chile",
+            "Contratista de camaras frigorificas y camaras de frio",
+            "instalador grande",
+        ),
+    ],
+)
+def test_required_positive_hvac_matrix(
+    snapshot, name, description, expected_type
+) -> None:
+    prospect = candidate(
+        name=name,
+        description=description,
+        category=None,
+        specialties=(),
+        brands=(),
+    )
+
+    assessment = evaluate_hvac_quality(
+        prospect,
+        allowed_target_types=snapshot.campaign.target_types,
+    )
+    prepared = classify_and_score(prospect, snapshot)
+    result = validate_candidate(prepared, snapshot)
+
+    assert assessment.eligible
+    assert assessment.inferred_target_type == expected_type
+    assert assessment.hvac_confidence >= 0.9
+    assert "official_website_hvac_evidence" in assessment.positive_signals
+    assert prepared.category == expected_type
+    assert result.accepted
+    assert any(item.provider == SourceName.official_website for item in prospect.evidence)
+
+
+@pytest.mark.parametrize(
+    ("name", "description", "website", "expected_reason"),
+    [
+        (
+            "Ferreteria Central",
+            "Ferreteria general con herramientas y materiales de construccion",
+            "https://ferreteria-central.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Servicio Hogar",
+            "Servicio tecnico de refrigeradores, lavadoras y linea blanca",
+            "https://servicio-hogar.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Auto Clima Chile",
+            "Reparacion de aire acondicionado automotriz",
+            "https://autoclima.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Transportes Frio Sur",
+            "Transporte refrigerado y camiones frigorificos",
+            "https://transportes-frio.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Supermercado La Plaza",
+            "Supermercado con camaras de frio para sus alimentos",
+            "https://supermercado-plaza.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Hotel Restaurante Cordillera",
+            "Hotel con climatizacion y camaras frigorificas propias",
+            "https://hotel-cordillera.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Empleos Tecnicos Chile",
+            "Oferta de empleo para tecnico en climatizacion",
+            "https://empleos-tecnicos.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Academia Termica",
+            "Curso de climatizacion y capacitacion HVAC",
+            "https://academia-termica.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Universidad Tecnica",
+            "Universidad con diplomado de refrigeracion industrial",
+            "https://universidad-tecnica.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Blog Aire y Frio",
+            "Blog de noticias sobre aire acondicionado",
+            "https://blog-aire-frio.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Directorio HVAC Chile",
+            "Directorio de empresas de climatizacion",
+            "https://www.amarillas.cl/hvac",
+            "excluded_business_type",
+        ),
+        (
+            "Marketplace Clima",
+            "Venta de equipos de aire acondicionado",
+            "https://www.mercadolibre.cl/aire-acondicionado",
+            "excluded_business_type",
+        ),
+        (
+            "Electricidad Integral",
+            "Empresa de electricidad y mantencion general",
+            "https://electricidad-integral.cl",
+            "excluded_business_type",
+        ),
+        (
+            "Clima Organizacional SpA",
+            "Consultoria de personas y clima laboral",
+            "https://clima-organizacional.cl",
+            "not_hvac_related",
+        ),
+        (
+            "Comercial Andes",
+            "Venta de articulos de oficina con telefono y sitio web",
+            "https://comercial-andes.cl",
+            "not_hvac_related",
+        ),
+    ],
+)
+def test_required_negative_business_matrix(
+    snapshot, name, description, website, expected_reason
+) -> None:
+    prospect = candidate(
+        name=name,
+        description=description,
+        website=website,
+        phone="+56223456789",
+        email="ventas@empresa.cl",
+        category=None,
+        specialties=(),
+        brands=(),
+    )
+
+    prepared = classify_and_score(prospect, snapshot)
+    result = validate_candidate(prepared, snapshot)
+
+    assert not result.accepted
+    assert expected_reason in result.reasons
+    assert prepared.score == 0
+
+
+def test_query_match_alone_is_never_trade_evidence(snapshot) -> None:
+    prospect = candidate(
+        name="Servicios Comerciales Sur",
+        description="Servicios para empresas",
+        phone="+56223456789",
+        category=None,
+        specialties=(),
+        brands=(),
+        review_flags=("hvac_query_match", "hvac_relevance_needs_review"),
+    )
+    prepared = classify_and_score(prospect, snapshot)
+    result = validate_candidate(prepared, snapshot)
+
+    assert prepared.score == 0
+    assert "not_hvac_related" in result.reasons
+    assert not result.accepted
+
+
+def test_other_is_never_accepted_automatically(snapshot) -> None:
+    prospect = candidate(
+        name="Soluciones de Climatizacion",
+        description="Soluciones de climatizacion para empresas",
+        category="otro",
+        specialties=(),
+        brands=(),
+    )
+    prepared = classify_and_score(prospect, snapshot)
+    result = validate_candidate(prepared, snapshot)
+
+    assert prepared.category == "otro"
+    assert prepared.score == 0
+    assert "target_type_unconfirmed" in result.reasons
+    assert not result.accepted
 
 
 def test_unsubstantiated_fields_are_scored_then_stripped_before_send(snapshot) -> None:
@@ -219,14 +437,37 @@ def test_quality_gate_rejects_when_any_branch_is_outside_campaign(snapshot) -> N
     [
         "air_conditioning_contractor",
         "hvac_contractor",
-        "heating_contractor",
-        "refrigeration",
+        "refrigeration_equipment_supplier",
+        "air_conditioning_equipment_store",
     ],
 )
 def test_quality_gate_accepts_official_google_hvac_types(snapshot, google_type) -> None:
     assert validate_candidate(
-        candidate(name="Servicios Técnicos Andes", description=google_type), snapshot
+        candidate(
+            name="Servicios Técnicos Andes",
+            description=google_type,
+            _evidence_provider=SourceName.google_places,
+        ),
+        snapshot,
     ).accepted
+
+
+@pytest.mark.parametrize("google_type", ["heating_contractor", "refrigeration"])
+def test_quality_gate_rejects_ambiguous_google_types_without_hvac_context(
+    snapshot, google_type
+) -> None:
+    result = validate_candidate(
+        candidate(
+            name="Servicios Andes",
+            description=google_type,
+            category=None,
+            specialties=(),
+            _evidence_provider=SourceName.google_places,
+        ),
+        snapshot,
+    )
+    assert not result.accepted
+    assert "not_hvac_related" in result.reasons
 
 
 @pytest.mark.parametrize(

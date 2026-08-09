@@ -17,25 +17,7 @@ from app.prospecting.contracts import (
     ProspectingRunSnapshot,
     SourceEvidence,
 )
-
-_HVAC_PATTERNS = tuple(
-    re.compile(pattern)
-    for pattern in (
-        r"\bclimatiz(?:acion|ador|adores|ar)\b",
-        r"\brefrigeracion\b",
-        r"\baire(?:s)? acondicionado(?:s)?\b",
-        r"\bcalefaccion\b",
-        r"\bventilacion\b",
-        r"\bhvac\b",
-        r"\bfrio industrial\b",
-        r"\bbomba(?:s)? de calor\b",
-        r"\bchiller(?:s)?\b",
-        r"\bair conditioning contractor\b",
-        r"\bhvac contractor\b",
-        r"\bheating contractor\b",
-        r"\brefrigeration\b",
-    )
-)
+from app.prospecting.quality import evaluate_hvac_quality
 
 
 def normalize_geo(value: str | None) -> str:
@@ -61,19 +43,15 @@ def normalize_geo(value: str | None) -> str:
 
 
 def is_hvac_relevant(candidate: ProspectCandidate) -> bool:
-    text = " ".join(
-        unidecode(value).lower()
-        for value in (
-            candidate.name,
-            candidate.trade_name,
-            candidate.category,
-            candidate.description,
-            *candidate.specialties,
-        )
-        if value
-    )
-    text = re.sub(r"[_-]+", " ", text)
-    return any(pattern.search(text) for pattern in _HVAC_PATTERNS)
+    """Return whether traceable source evidence confirms HVAC-R activity.
+
+    This compatibility helper intentionally ignores the originating search
+    query and contact completeness.  Full admission always happens in
+    ``validate_candidate``.
+    """
+
+    assessment = evaluate_hvac_quality(candidate)
+    return assessment.hvac_confidence >= 0.8 and not assessment.exclusion_reasons
 
 
 def is_in_requested_territory(
@@ -226,21 +204,24 @@ class QualityResult:
 def validate_candidate(
     candidate: ProspectCandidate, snapshot: ProspectingRunSnapshot
 ) -> QualityResult:
-    reasons: list[str] = []
-    if not is_hvac_relevant(candidate):
-        reasons.append("not_hvac_related")
+    radar_mode = "competencia" in snapshot.campaign.target_types
+    assessment = evaluate_hvac_quality(
+        candidate,
+        allowed_target_types=snapshot.campaign.target_types,
+        radar_mode=radar_mode,
+    )
+    reasons: list[str] = list(assessment.exclusion_reasons)
     if not is_in_requested_territory(candidate, snapshot):
         reasons.append("outside_requested_territory")
     if not has_business_contact(candidate):
         reasons.append("missing_business_contact")
     if not has_complete_evidence(candidate):
         reasons.append("missing_required_evidence")
-    if (
-        candidate.category
-        and candidate.category not in snapshot.campaign.target_types
-        and not (
-            candidate.category == "otro" and "target_type_unconfirmed" in candidate.review_flags
-        )
-    ):
+    if candidate.category in {None, "otro"}:
+        reasons.append("target_type_unconfirmed")
+    elif candidate.category not in snapshot.campaign.target_types:
         reasons.append("outside_target_types")
-    return QualityResult(accepted=not reasons, reasons=tuple(reasons))
+    return QualityResult(
+        accepted=not reasons,
+        reasons=tuple(dict.fromkeys(reasons)),
+    )

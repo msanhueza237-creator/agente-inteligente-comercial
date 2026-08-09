@@ -1,60 +1,16 @@
 from __future__ import annotations
 
-import re
-
-from unidecode import unidecode
-
 from app.prospecting.contracts import (
     DerivedProvenance,
     ProspectCandidate,
     ProspectingRunSnapshot,
 )
+from app.prospecting.quality import evaluate_hvac_quality, infer_hvac_target_type
 
 
-def infer_target_type(candidate: ProspectCandidate) -> str:
-    text = " ".join(
-        unidecode(value).lower()
-        for value in (
-            candidate.name,
-            candidate.trade_name,
-            candidate.description,
-            candidate.category,
-        )
-        if value
-    )
-    text = re.sub(r"[_-]+", " ", text)
-    if re.search(r"\b(distribuidor|importador|mayorista|distribucion)\b", text):
-        return "distribuidor"
-    if re.search(r"\b(tienda|retail|venta al detalle|e commerce|repuesto|insumo|suministro)\b", text):
-        return "tienda comercial"
-    if re.search(r"\b(competencia|competidor|proveedor)\b", text):
-        return "competencia"
-    if re.search(r"\b(industrial|ingenieria|grandes proyectos|proyectos comerciales)\b", text):
-        return "instalador grande"
-    if re.search(
-        r"\b(tecnico|mantencion|mantenimiento|reparacion|instalacion|instalador|contractor|refrigeracion|refrigeration)\b",
-        text,
-    ):
-        return "tecnico"
-    return "otro"
-
-
-def score_candidate(candidate: ProspectCandidate, snapshot: ProspectingRunSnapshot) -> float:
-    score = 35.0
-    if candidate.category in snapshot.campaign.target_types:
-        score += 20
-    if candidate.rut:
-        score += 10
-    if candidate.phone:
-        score += 10
-    if candidate.email:
-        score += 10
-    if candidate.website:
-        score += 5
-    providers = {evidence.provider for evidence in candidate.evidence}
-    score += min(10, len(providers) * 5)
-    text = " ".join(
-        unidecode(value).lower()
+def _classification_text(candidate: ProspectCandidate) -> str:
+    return " ".join(
+        value
         for value in (
             candidate.name,
             candidate.trade_name,
@@ -64,18 +20,52 @@ def score_candidate(candidate: ProspectCandidate, snapshot: ProspectingRunSnapsh
         )
         if value
     )
-    text = re.sub(r"[_-]+", " ", text)
-    if re.search(r"\b(distribuidor|mayorista|importador)\b", text):
-        score += 12
-    elif re.search(r"\b(repuesto|insumo|proveedor|suministro)\b", text):
-        score += 8
-    if candidate.specialties:
-        score += min(8, len(candidate.specialties) * 2)
-    if candidate.brands:
-        score += min(6, len(candidate.brands) * 2)
-    if any(evidence.provider.value == "official_website" for evidence in candidate.evidence):
-        score += 8
-    return min(100.0, score)
+
+
+def infer_target_type(candidate: ProspectCandidate) -> str | None:
+    """Infer only a supported HVAC-R commercial role.
+
+    A generic refrigeration or maintenance token is deliberately not enough.
+    """
+
+    return infer_hvac_target_type(_classification_text(candidate))
+
+
+def score_candidate(candidate: ProspectCandidate, snapshot: ProspectingRunSnapshot) -> float:
+    assessment = evaluate_hvac_quality(
+        candidate,
+        allowed_target_types=snapshot.campaign.target_types,
+        radar_mode="competencia" in snapshot.campaign.target_types,
+    )
+    if not assessment.eligible:
+        return 0.0
+
+    # Relevance is a gate and also the largest score component (max 45).
+    score = assessment.hvac_confidence * 45
+    if assessment.inferred_target_type in snapshot.campaign.target_types:
+        score += 20
+
+    permanent = [
+        evidence
+        for evidence in candidate.evidence
+        if evidence.retention_until is None and evidence.confidence >= 0.7
+    ]
+    permanent_fields = {evidence.field for evidence in permanent}
+    permanent_providers = {evidence.provider for evidence in permanent}
+    score += min(15, len(permanent_fields) * 2 + len(permanent_providers) * 3)
+
+    # Contact completeness cannot compensate for an irrelevant company (max 10).
+    score += 4 if candidate.phone else 0
+    score += 3 if candidate.email else 0
+    score += 3 if candidate.website else 0
+
+    # Observable scale/potential signals only (max 10).
+    query_hits = int(candidate.market_signals.get("query_hits", 0) or 0)
+    scale_score = min(4, query_hits)
+    scale_score += min(3, len(candidate.brands))
+    scale_score += min(3, max(0, len(candidate.locations) - 1))
+    score += scale_score
+    return min(100.0, round(score, 2))
 
 
 def market_importance_score(candidate: ProspectCandidate) -> float:
@@ -100,7 +90,12 @@ def market_importance_score(candidate: ProspectCandidate) -> float:
 def classify_and_score(
     candidate: ProspectCandidate, snapshot: ProspectingRunSnapshot
 ) -> ProspectCandidate:
-    category = infer_target_type(candidate)
+    assessment = evaluate_hvac_quality(
+        candidate,
+        allowed_target_types=snapshot.campaign.target_types,
+        radar_mode="competencia" in snapshot.campaign.target_types,
+    )
+    category = assessment.inferred_target_type or "otro"
     review_flags = list(candidate.review_flags)
     if category == "otro" and "target_type_unconfirmed" not in review_flags:
         review_flags.append("target_type_unconfirmed")
@@ -111,11 +106,11 @@ def classify_and_score(
     provenance = {
         **candidate.derived_provenance,
         "category": DerivedProvenance(
-            ruleset="clima_activa_hvac_classification_v1",
+            ruleset="clima_activa_hvac_classification_v2",
             input_fields=("name", "trade_name", "description", "specialties"),
         ),
         "score": DerivedProvenance(
-            ruleset="clima_activa_commercial_score_v1",
+            ruleset="clima_activa_commercial_score_v2",
             input_fields=(
                 "category",
                 "rut",
@@ -128,9 +123,15 @@ def classify_and_score(
             ),
         ),
     }
-    market_score = market_importance_score(prepared)
+    market_score = market_importance_score(prepared) if assessment.eligible else 0.0
     provenance["market_score"] = DerivedProvenance(
         ruleset="clima_activa_market_importance_v1",
         input_fields=("market_signals", "category", "brands", "locations", "evidence"),
     )
-    return prepared.model_copy(update={"score": score, "market_score": market_score, "derived_provenance": provenance})
+    return prepared.model_copy(
+        update={
+            "score": score,
+            "market_score": market_score,
+            "derived_provenance": provenance,
+        }
+    )

@@ -4,7 +4,6 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 import json
-import re
 import uuid
 
 import httpx
@@ -39,9 +38,9 @@ from app.prospecting.budget import (
     brave_provider_usage_from_headers,
 )
 from app.prospecting.dedup import merge_exact_candidate
+from app.prospecting.quality import evaluate_google_discovery, evaluate_hvac_quality
 from app.prospecting.store import WorkerTask
 from app.prospecting.validation import normalize_geo
-from app.prospecting.validation import is_hvac_relevant
 
 
 @dataclass(frozen=True)
@@ -71,14 +70,47 @@ class SourceExecutor(Protocol):
     ) -> Sequence[ProspectCandidate]: ...
 
 
-_TARGET_QUERY_PREFIXES = {
-    "distribuidor": ("distribuidor", "mayorista", "importador", "proveedor"),
-    "tienda comercial": ("tienda", "repuestos", "venta", "insumos"),
-    "tecnico": ("servicio tecnico", "mantencion y reparacion"),
-    "instalador grande": ("empresa instaladora", "proyectos comerciales"),
-    "competencia": ("empresa", "proyectos HVAC", "refrigeracion industrial"),
-    "otro": ("empresa",),
+_TARGET_QUERY_INTENTS = {
+    "distribuidor": (
+        "distribuidor HVAC",
+        "mayorista refrigeracion comercial",
+        "importador aire acondicionado",
+        "proveedor repuestos HVAC-R",
+        "distribuidor insumos refrigeracion",
+    ),
+    "tienda comercial": (
+        "tienda de repuestos aire acondicionado",
+        "insumos refrigeracion comercial",
+        "herramientas refrigeracion",
+        "venta equipos climatizacion",
+        "local especializado HVAC-R",
+    ),
+    "tecnico": (
+        "instalador aire acondicionado",
+        "servicio tecnico climatizacion",
+        "mantencion aire acondicionado comercial",
+        "reparacion refrigeracion comercial",
+        "tecnico HVAC",
+    ),
+    "instalador grande": (
+        "empresa refrigeracion industrial",
+        "contratista HVAC",
+        "proyectos climatizacion comercial",
+        "instalacion camaras frigorificas",
+        "ingenieria HVAC-R",
+    ),
+    "competencia": (
+        "empresa HVAC-R",
+        "distribuidor climatizacion",
+        "proyectos refrigeracion industrial",
+        "contratista aire acondicionado comercial",
+    ),
 }
+
+_BRAVE_EXCLUSIONS = (
+    "-empleo -trabajo -curso -capacitacion -universidad -instituto "
+    "-blog -noticias -filetype:pdf -mercadolibre -yapo"
+)
 
 _COMMERCIAL_QUERY_LEADS = (
     "tienda de ",
@@ -107,32 +139,25 @@ def _query_subject(keyword: str) -> str:
     return subject
 
 
-def _commercial_query(prefix: str, subject: str, location: str) -> str:
-    folded_prefix = prefix.casefold().strip()
-    connector = "" if folded_prefix.endswith(("hvac", "comerciales")) else " de"
-    return f"{prefix}{connector} {subject} en {location}"
+def _keyword_hvac_intent(keyword: str, target_type: str) -> str:
+    """Keep editable campaign keywords without allowing a generic raw query."""
 
-
-def _semantic_hvac_queries(subject: str, location: str) -> tuple[str, ...]:
-    folded = re.sub(r"\s+", " ", subject.casefold()).strip()
-    if any(token in folded for token in ("climat", "aire acondicionado", "hvac", "refrig")):
-        intents = (
-            "equipos de aire acondicionado",
-            "repuestos de climatizacion",
-            "insumos de refrigeracion",
-            "venta de aire acondicionado",
-            "proveedor HVAC",
-            "climatizacion comercial",
-        )
-    else:
-        intents = (
-            f"equipos de {subject}",
-            f"repuestos de {subject}",
-            f"insumos de {subject}",
-            f"venta de {subject}",
-            f"proveedor de {subject}",
-        )
-    return tuple(f"{intent} en {location}" for intent in intents)
+    subject = _query_subject(keyword)
+    folded = subject.casefold()
+    has_hvac_context = any(
+        token in folded
+        for token in ("aire acondicionado", "climat", "hvac", "refriger", "frigor")
+    )
+    if has_hvac_context:
+        return subject
+    role_context = {
+        "distribuidor": "proveedor HVAC-R",
+        "tienda comercial": "tienda especializada HVAC-R",
+        "tecnico": "servicio tecnico HVAC-R",
+        "instalador grande": "contratista HVAC-R",
+        "competencia": "empresa HVAC-R",
+    }.get(target_type, "empresa HVAC-R")
+    return f"{subject} {role_context}"
 
 _SPECIALTY_LABELS = {
     "aire acondicionado": "aire acondicionado",
@@ -226,30 +251,16 @@ def build_google_query_plan(
 
     location = f"{task.comuna_name}, {task.region_name}, Chile"
     keyword = " ".join(task.keyword.strip().split())
-    subject = _query_subject(keyword)
-    queries = [f"{keyword} en {location}"]
-    # Interleave the commercial roles.  This prevents the first selected
-    # target type from consuming the whole request budget and gives one
-    # relevant query to distributors, stores and competitors alike.
-    role_prefixes = [
-        _TARGET_QUERY_PREFIXES.get(target_type, ())
-        for target_type in snapshot.campaign.target_types
-    ]
-    for prefix_index in range(max((len(prefixes) for prefixes in role_prefixes), default=0)):
-        for prefixes in role_prefixes:
-            if prefix_index < len(prefixes):
-                queries.append(_commercial_query(prefixes[prefix_index], subject, location))
-    queries.extend(_semantic_hvac_queries(subject, location))
-    queries.extend(
-        (
-            f"empresa de {subject} en {location}",
-            f"instalacion de {subject} en {location}",
-            f"mantencion de {subject} en {location}",
-            f"servicio tecnico de {subject} en {location}",
-            f"venta de {subject} en {location}",
-            f"proveedor de {subject} en {location}",
-        )
-    )
+    targets = [target for target in snapshot.campaign.target_types if target != "otro"]
+    queries: list[str] = []
+    role_intents = [_TARGET_QUERY_INTENTS.get(target, ()) for target in targets]
+    # Interleave roles so one selected type cannot consume the whole budget.
+    for intent_index in range(max((len(intents) for intents in role_intents), default=0)):
+        for target, intents in zip(targets, role_intents, strict=False):
+            if intent_index < len(intents):
+                queries.append(f"{intents[intent_index]} en {location}")
+            if intent_index == 0 and keyword:
+                queries.append(f"{_keyword_hvac_intent(keyword, target)} en {location}")
     unique: list[str] = []
     seen: set[str] = set()
     for query in queries:
@@ -264,28 +275,37 @@ def build_google_query_plan(
 
 
 def is_market_radar(snapshot: ProspectingRunSnapshot) -> bool:
-    targets = set(snapshot.campaign.target_types)
-    return bool(targets & {"distribuidor", "tienda comercial", "competencia"}) and not bool(
-        targets & {"tecnico", "instalador grande"}
-    )
+    return "competencia" in set(snapshot.campaign.target_types)
 
 
-def build_brave_market_query_plan(task: WorkerTask, *, max_queries: int) -> tuple[str, ...]:
-    region = task.region_name or task.comuna_name
-    keyword = task.keyword
-    intents = (
-        f'"{keyword}" distribuidor Chile',
-        f'"{keyword}" mayorista Chile',
-        f'"{keyword}" importador Chile',
-        f'"{keyword}" repuestos Chile',
-        f'"{keyword}" tienda {region} Chile',
-        f'"{keyword}" proveedor {region} Chile',
-        f'"{keyword}" marcas catalogo Chile',
-        f'"{keyword}" empresa refrigeracion climatizacion Chile',
-        f'"{keyword}" sucursales Chile',
-        f'"{keyword}" venta insumos HVAC Chile',
-    )
-    return intents[:max_queries]
+def build_brave_market_query_plan(
+    task: WorkerTask,
+    snapshot: ProspectingRunSnapshot,
+    *,
+    max_queries: int,
+) -> tuple[str, ...]:
+    location = f"{task.comuna_name} {task.region_name} Chile"
+    targets = [target for target in snapshot.campaign.target_types if target != "otro"]
+    queries: list[str] = []
+    role_intents = [_TARGET_QUERY_INTENTS.get(target, ()) for target in targets]
+    for intent_index in range(max((len(intents) for intents in role_intents), default=0)):
+        for target, intents in zip(targets, role_intents, strict=False):
+            if intent_index < len(intents):
+                queries.append(f'"{intents[intent_index]}" {location} {_BRAVE_EXCLUSIONS}')
+            if intent_index == 0 and task.keyword:
+                query = _keyword_hvac_intent(task.keyword, target)
+                queries.append(f'"{query}" {location} {_BRAVE_EXCLUSIONS}')
+    unique: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        key = " ".join(query.casefold().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(query)
+        if len(unique) >= max_queries:
+            break
+    return tuple(unique)
 
 
 def _evidence(
@@ -447,22 +467,28 @@ class AuthorizedSourceExecutor:
 
         survivors: list[tuple[int, int, int, dict]] = []
         outside_territory = 0
+        prefilter_not_hvac = 0
+        prefilter_excluded = 0
         for key, place in unique_places.items():
             name = (place.get("displayName") or {}).get("text") or ""
-            discovery_candidate = ProspectCandidate(
-                name=name or "Resultado sin nombre",
-                location=_location_for_google(place, task),
-                description=" ".join(place.get("types") or []),
-            )
-            location = discovery_candidate.location
+            location = _location_for_google(place, task)
             if location.region_code != task.region_code or location.comuna_code != task.comuna_code:
                 outside_territory += 1
                 continue
-            # Prefer explicit HVAC signals, but do not discard generic Google
-            # categories before Place Details can provide contact information.
-            priority = 1 if is_hvac_relevant(discovery_candidate) else 0
+            assessment = evaluate_google_discovery(
+                name=name,
+                place_types=tuple(place.get("types") or ()),
+                independent_query_hits=place_query_hits.get(key, 1),
+            )
+            if not assessment.allow_details:
+                reason = assessment.exclusion_reasons[0] if assessment.exclusion_reasons else "not_hvac_related"
+                if reason == "excluded_business_type":
+                    prefilter_excluded += 1
+                else:
+                    prefilter_not_hvac += 1
+                continue
             survivors.append(
-                (priority, place_query_hits.get(key, 1), place_order.get(key, 0), place)
+                (assessment.priority, place_query_hits.get(key, 1), place_order.get(key, 0), place)
             )
         survivors.sort(key=lambda item: (-item[0], -item[1], item[2]))
 
@@ -472,6 +498,7 @@ class AuthorizedSourceExecutor:
             task.max_results * self.settings.google_places_detail_multiplier,
         )
         details_requested = 0
+        closed_permanently = 0
         for _priority, _query_hits, _order, place in survivors[:detail_limit]:
             place_id = place.get("id")
             details = None
@@ -496,6 +523,9 @@ class AuthorizedSourceExecutor:
                 monthly_spend = reservation.monthly_spend_usd
             details_requested += int(bool(place_id))
             source = details or place
+            if str(source.get("businessStatus") or "").upper() == "CLOSED_PERMANENTLY":
+                closed_permanently += 1
+                continue
             name = (source.get("displayName") or {}).get("text")
             if not name:
                 continue
@@ -592,16 +622,6 @@ class AuthorizedSourceExecutor:
                 description=description,
                 evidence=[item for item in evidence if item is not None],
             )
-            if not is_hvac_relevant(candidate):
-                candidate = candidate.model_copy(
-                    update={
-                        "review_flags": (
-                            *candidate.review_flags,
-                            "hvac_query_match",
-                            "hvac_relevance_needs_review",
-                        )
-                    }
-                )
             candidates.append(candidate)
         return SourceSearchResult(
             tuple(candidates),
@@ -613,6 +633,10 @@ class AuthorizedSourceExecutor:
                 "raw_results": raw_results,
                 "unique_results": len(unique_places),
                 "outside_territory_discovery": outside_territory,
+                "prefilter_candidates_retained": len(survivors),
+                "discarded_not_hvac_related": prefilter_not_hvac,
+                "discarded_excluded_business_type": prefilter_excluded,
+                "discarded_closed_permanently": closed_permanently,
                 "details_requested": details_requested,
                 "candidates_prepared": len(candidates),
                 "estimated_google_cost_usd": round(
@@ -639,8 +663,10 @@ class AuthorizedSourceExecutor:
         if radar and task.comuna_code != anchor:
             return SourceSearchResult((), {"queries_executed": 0, "radar_region_anchor_skipped": True})
         queries = build_brave_market_query_plan(
-            task, max_queries=self.settings.brave_market_queries_per_region
-        ) if radar else (f'"{task.comuna_name}" {task.keyword} Chile',)
+            task,
+            snapshot,
+            max_queries=getattr(self.settings, "brave_market_queries_per_region", 8),
+        )
         query_plan: list[tuple[str, str]] = [(query, "discovery") for query in queries]
         if snapshot.brave_policy.social_search_enabled and task.comuna_code == anchor:
             social_limit = snapshot.brave_policy.max_social_queries_per_campaign
@@ -695,6 +721,8 @@ class AuthorizedSourceExecutor:
                     await self.brave_budget.complete(reservation, len(web_results))
 
         by_domain: dict[str, ProspectCandidate] = {}
+        excluded_business_type = 0
+        missing_required_evidence = 0
         for rank, result in results:
             url = result.get("url")
             title = BeautifulSoup(result.get("title") or "", "lxml").get_text(" ").strip()
@@ -742,22 +770,17 @@ class AuthorizedSourceExecutor:
                 market_signals={"query_hits": 1, "best_rank": rank, "radar_mode": radar},
             )
             if not self._is_official_website_candidate(candidate):
-                candidate = candidate.model_copy(
-                    update={
-                        "website": None,
-                        "evidence": [
-                            item for item in candidate.evidence if item.field != "website"
-                        ],
-                    }
-                )
-            if radar and not candidate.website:
+                if self._is_blocked_discovery_domain(url):
+                    excluded_business_type += 1
+                else:
+                    missing_required_evidence += 1
                 continue
             domain = normalize_website(candidate.website or url) or provider_id
             existing = by_domain.get(domain)
             by_domain[domain] = merge_exact_candidate(existing, candidate) if existing else candidate
         candidates = list(by_domain.values())
         candidates.sort(key=lambda item: (-int(item.market_signals.get("query_hits", 0)), int(item.market_signals.get("best_rank", 99))))
-        return SourceSearchResult(tuple(candidates), {"queries_executed": queries_executed, "social_queries_executed": social_queries_executed, "raw_results": len(results), "unique_results": len(candidates), "market_radar": radar, "budget_limited": budget_limited, "budget_reason": "monthly_budget_exhausted" if budget_limited else None, "monthly_spend_usd": round(monthly_spend, 4)})
+        return SourceSearchResult(tuple(candidates), {"queries_executed": queries_executed, "social_queries_executed": social_queries_executed, "raw_results": len(results), "unique_results": len(candidates), "market_radar": radar, "discarded_excluded_business_type": excluded_business_type, "discarded_missing_required_evidence": missing_required_evidence, "budget_limited": budget_limited, "budget_reason": "monthly_budget_exhausted" if budget_limited else None, "monthly_spend_usd": round(monthly_spend, 4)})
 
     async def _enrich_official_website(
         self, candidate: ProspectCandidate, task: WorkerTask,
@@ -928,8 +951,12 @@ class AuthorizedSourceExecutor:
             }
         )
         official_evidence = [item for item in enriched.evidence if item.provider == SourceName.official_website]
+        quality = evaluate_hvac_quality(enriched)
         return enriched, {
-            "hvac_relevant": is_hvac_relevant(enriched),
+            "hvac_relevant": quality.eligible,
+            "hvac_confidence": quality.hvac_confidence,
+            "hvac_positive_signals": list(quality.positive_signals),
+            "hvac_exclusion_reasons": list(quality.exclusion_reasons),
             "website_found": bool(enriched.website),
             "website_discovered_by_brave": False,
             "brave_queries_used": 0,
@@ -967,17 +994,18 @@ class AuthorizedSourceExecutor:
         return None
 
     @staticmethod
-    def _is_official_website_candidate(candidate: ProspectCandidate) -> bool:
-        if not candidate.website or not normalize_website(candidate.website):
-            return False
-        parsed = urlsplit(
-            candidate.website if "://" in candidate.website else f"https://{candidate.website}"
-        )
-        if parsed.scheme not in {"http", "https"}:
-            return False
-        domain = normalize_website(candidate.website) or ""
+    def _is_blocked_discovery_domain(url: str) -> bool:
+        if not url:
+            return True
+        parsed = urlsplit(url if "://" in url else f"https://{url}")
+        host = (parsed.hostname or "").casefold().removeprefix("www.")
         blocked_domains = {
             "amarillas.cl",
+            "chileguia.cl",
+            "guiadeempresas.cl",
+            "chileinform.com",
+            "hotfrog.cl",
+            "mercantil.com",
             "google.com",
             "google.cl",
             "facebook.com",
@@ -986,11 +1014,28 @@ class AuthorizedSourceExecutor:
             "twitter.com",
             "x.com",
             "mercadolibre.cl",
+            "mercadolibre.com",
             "yapo.cl",
             "starofservice.cl",
             "tripadvisor.cl",
+            "wikipedia.org",
         }
-        if domain in blocked_domains:
+        if any(host == domain or host.endswith(f".{domain}") for domain in blocked_domains):
+            return True
+        path = parsed.path.casefold().rstrip("/")
+        return path.endswith((".pdf", ".doc", ".docx"))
+
+    @classmethod
+    def _is_official_website_candidate(cls, candidate: ProspectCandidate) -> bool:
+        if not candidate.website or not normalize_website(candidate.website):
+            return False
+        parsed = urlsplit(
+            candidate.website if "://" in candidate.website else f"https://{candidate.website}"
+        )
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        domain = normalize_website(candidate.website) or ""
+        if cls._is_blocked_discovery_domain(candidate.website):
             return False
         # A website declared by a Google Business profile is considered the
         # business site. Brave-only hits need a name/domain affinity signal.

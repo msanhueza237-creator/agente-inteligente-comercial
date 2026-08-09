@@ -92,8 +92,6 @@ class ProspectingCampaign(BaseModel):
             "tienda comercial",
             "tecnico",
             "instalador grande",
-            "competencia",
-            "otro",
         ),
         min_length=1,
     )

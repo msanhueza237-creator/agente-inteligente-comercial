@@ -111,7 +111,7 @@ def test_name_affinity_allows_probable_company_website() -> None:
 
 
 @pytest.mark.asyncio
-async def test_google_expansion_deduplicates_and_keeps_generic_geo_matches(monkeypatch) -> None:
+async def test_google_expansion_deduplicates_and_prefilters_generic_results(monkeypatch) -> None:
     address = [
         {"types": ["administrative_area_level_1"], "longText": "Región Metropolitana de Santiago"},
         {"types": ["administrative_area_level_3"], "longText": "Santiago"},
@@ -211,8 +211,8 @@ async def test_google_expansion_deduplicates_and_keeps_generic_geo_matches(monke
 
     candidates = await executor.search(task, snapshot)
 
-    assert len(candidates) == 2
-    assert FakeGoogle.details_calls == ["valid", "irrelevant"]
+    assert len(candidates) == 1
+    assert FakeGoogle.details_calls == ["valid"]
     assert candidates.metrics == {
         "queries_planned": 6,
         "queries_executed": 6,
@@ -221,15 +221,19 @@ async def test_google_expansion_deduplicates_and_keeps_generic_geo_matches(monke
         "raw_results": 18,
         "unique_results": 3,
         "outside_territory_discovery": 1,
-        "details_requested": 2,
-        "candidates_prepared": 2,
-        "estimated_google_cost_usd": 0.232,
+        "discarded_closed_permanently": 0,
+        "discarded_excluded_business_type": 0,
+        "discarded_not_hvac_related": 1,
+        "prefilter_candidates_retained": 1,
+        "details_requested": 1,
+        "candidates_prepared": 1,
+        "estimated_google_cost_usd": 0.212,
         "budget_limited": False,
         "budget_reason": None,
         "budget_alert": False,
-        "run_spend_usd": 0.232,
-        "daily_spend_usd": 0.232,
-        "monthly_spend_usd": 0.232,
+        "run_spend_usd": 0.212,
+        "daily_spend_usd": 0.212,
+        "monthly_spend_usd": 0.212,
         "run_budget_usd": 10.0,
     }
     prepared = scope_candidate_locations(
@@ -391,9 +395,10 @@ def test_google_query_plan_expands_target_intents_without_duplicates() -> None:
 
     assert len(queries) == 6
     assert len({query.casefold() for query in queries}) == 6
-    assert queries[0].startswith("aire acondicionado en Santiago")
-    assert any("tienda de aire acondicionado" in query for query in queries)
-    assert any("servicio tecnico de aire acondicionado" in query for query in queries)
+    assert queries[0].startswith("tienda de repuestos aire acondicionado en Santiago")
+    assert any("insumos refrigeracion comercial" in query for query in queries)
+    assert any("instalador aire acondicionado" in query for query in queries)
+    assert any("servicio tecnico climatizacion" in query for query in queries)
 
 
 def test_store_keyword_expansion_does_not_repeat_commercial_lead() -> None:
@@ -433,9 +438,10 @@ def test_store_keyword_expansion_does_not_repeat_commercial_lead() -> None:
 
     queries = build_google_query_plan(task, snapshot, max_queries=8)
 
-    assert queries[0].startswith("tienda de climatizacion en Santiago")
+    assert queries[0].startswith("tienda de repuestos aire acondicionado en Santiago")
     assert not any("tienda de tienda" in query.casefold() for query in queries)
-    assert any("repuestos de climatizacion" in query.casefold() for query in queries)
+    assert any("insumos refrigeracion comercial" in query.casefold() for query in queries)
+    assert any("herramientas refrigeracion" in query.casefold() for query in queries)
 
 
 def test_market_coverage_query_plan_interleaves_commercial_roles() -> None:
@@ -475,11 +481,11 @@ def test_market_coverage_query_plan_interleaves_commercial_roles() -> None:
 
     queries = build_google_query_plan(task, snapshot, max_queries=6)
 
-    assert any("distribuidor de refrigeracion comercial" in query for query in queries)
-    assert any("tienda de refrigeracion comercial" in query for query in queries)
-    assert any("empresa de refrigeracion comercial" in query for query in queries)
-    assert any("mayorista de refrigeracion comercial" in query for query in queries)
-    assert any("repuestos de refrigeracion comercial" in query for query in queries)
+    assert any("distribuidor HVAC" in query for query in queries)
+    assert any("tienda de repuestos aire acondicionado" in query for query in queries)
+    assert any("empresa HVAC-R" in query for query in queries)
+    assert any("mayorista refrigeracion comercial" in query for query in queries)
+    assert any("insumos refrigeracion comercial" in query for query in queries)
 
 
 def test_market_radar_uses_broad_commercial_intents_without_company_names() -> None:
@@ -491,13 +497,34 @@ def test_market_radar_uses_broad_commercial_intents_without_company_names() -> N
         region_name="Metropolitana de Santiago", comuna_code="13101",
         comuna_name="Santiago", max_results=20, attempt_count=1, max_attempts=3,
     )
-    queries = build_brave_market_query_plan(task, max_queries=8)
+    snapshot = ProspectingRunSnapshot(
+        crm_run_id="run",
+        campaign_version=1,
+        requested_by="admin",
+        campaign=ProspectingCampaign(
+            crm_campaign_id="campaign-radar",
+            name="Radar",
+            territories=(
+                Territory(
+                    region_code="13",
+                    region_name="Metropolitana de Santiago",
+                    comuna_code="13101",
+                    comuna_name="Santiago",
+                ),
+            ),
+            keywords=("refrigeracion comercial",),
+            sources=(SourceName.brave_search, SourceName.official_website),
+            target_types=("distribuidor", "tienda comercial", "competencia"),
+        ),
+    )
+    queries = build_brave_market_query_plan(task, snapshot, max_queries=8)
 
     assert len(queries) == 8
     assert any("distribuidor" in query for query in queries)
     assert any("mayorista" in query for query in queries)
     assert any("importador" in query for query in queries)
-    assert any("marcas catalogo" in query for query in queries)
+    assert all("-empleo" in query and "-mercadolibre" in query for query in queries)
+    assert any("refrigeracion comercial" in query for query in queries)
     assert not any("acondipart" in query.casefold() for query in queries)
 
 

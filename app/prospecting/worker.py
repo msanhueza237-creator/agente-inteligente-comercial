@@ -40,6 +40,7 @@ from app.prospecting.validation import (
     sanitize_unsubstantiated_external_fields,
     validate_candidate,
 )
+from app.prospecting.quality import QUALITY_REJECTION_REASONS
 
 logger = logging.getLogger("clima_activa.prospecting_worker")
 
@@ -332,7 +333,9 @@ class ProspectingWorker:
                     }
                 )
             qualified: list[ProspectCandidate] = []
-            rejection_counts: dict[str, int] = {}
+            rejection_counts: dict[str, int] = {
+                reason: 0 for reason in QUALITY_REJECTION_REASONS
+            }
             for candidate in candidates:
                 candidate = classify_and_score(candidate, claim.snapshot)
                 candidate = sanitize_unsubstantiated_external_fields(candidate)
