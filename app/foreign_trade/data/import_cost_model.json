@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "currency": "USD",
   "reference": {
     "dispatch": "49194",
@@ -22,7 +22,7 @@
     "reference_exchange_rate_clp_usd": 904.14
   },
   "derived_rates": {
-    "freight_usd_per_cbm": 121.4286,
+    "freight_usd_per_cbm": 125.9259,
     "insurance_percent_fob": 0.3487,
     "customs_duty_percent_cif": 0.5223,
     "local_and_agency_usd_per_cbm": 26.1656,
@@ -41,7 +41,7 @@
       "El flete base del contenedor 20GP usa primero la ultima factura AD/ADS Cargas disponible en el CRM por Facto.",
       "Seguro, derechos, gastos locales netos y honorarios netos usan facturas y solicitudes de fondos historicas de Agencia Rodriguez Palma encontradas en Gmail, con Jorge Rodriguez como contacto de referencia.",
       "Los costos de Agencia Rodriguez Palma varian por despacho: deben actualizarse con la factura o solicitud vigente y nunca se consideran tarifas fijas.",
-      "Para comparar productos, el flete se asigna por m3; el total consolidado reconoce el costo completo de cada contenedor requerido."
+      "La factura ADS de USD 3.400 corresponde a un 20GP completo de 27 m3 utiles; cada propuesta reconoce solo la proporcion de flete asociada a sus m3 utilizados."
     ]
   }
 }

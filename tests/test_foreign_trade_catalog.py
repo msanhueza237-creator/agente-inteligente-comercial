@@ -30,7 +30,7 @@ def test_freight_reference_uses_latest_verified_ads_20gp_invoice() -> None:
 
     assert freight["provider"]["name"] == "ADS INTERNACIONAL CARGO SPA"
     assert freight["container_policy"]["type"] == "20GP"
-    assert freight["container_policy"]["planning_capacity_cbm"] == pytest.approx(28)
+    assert freight["container_policy"]["planning_capacity_cbm"] == pytest.approx(27)
     assert freight["summary"]["latest_invoice_number"] == "1702"
     assert freight["summary"]["latest_verified_usd"] == pytest.approx(3400)
 
@@ -107,7 +107,10 @@ def test_import_report_values_freight_with_crm_facto_invoice() -> None:
     )
 
     proposal = report["purchase_proposal"]
-    assert proposal["totals"]["freight_usd"] == pytest.approx(4100)
+    assert proposal["totals"]["freight_usd"] == pytest.approx(
+        4100 * proposal["totals"]["total_cbm"] / 27,
+        abs=0.02,
+    )
     assert proposal["freight_reference"]["latest_invoice_number"] == "2044"
     assert proposal["freight_reference"]["latest_source"] == "crm_facto_purchase_invoice"
 
@@ -228,10 +231,48 @@ def test_import_report_separates_recoverable_vat_from_landed_cost() -> None:
     )
     assert proposal["totals"]["fob_usd"] <= 70000
     assert proposal["container_type"] == "20GP"
-    assert proposal["container_reference_cbm"] == pytest.approx(28)
-    assert proposal["totals"]["freight_usd"] == pytest.approx(3400)
+    assert proposal["container_reference_cbm"] == pytest.approx(27)
+    assert proposal["totals"]["freight_usd"] == pytest.approx(
+        3400 * proposal["totals"]["total_cbm"] / 27,
+        abs=0.02,
+    )
+    assert proposal["freight_full_container_usd"] == pytest.approx(3400)
+    assert proposal["freight_allocation_policy"] == "proportional_to_used_cbm"
+    assert proposal["freight_proration_factor"] == pytest.approx(
+        proposal["totals"]["total_cbm"] / 27,
+        abs=0.0002,
+    )
+    assert sum(item["costs"]["freight_usd"] for item in proposal["items"]) == pytest.approx(
+        proposal["totals"]["freight_usd"],
+        abs=0.02,
+    )
     assert proposal["container_remaining_cbm"] == pytest.approx(
-        28 - proposal["totals"]["total_cbm"], abs=0.02
+        27 - proposal["totals"]["total_cbm"], abs=0.02
+    )
+
+
+def test_purchase_proposal_uses_complete_packing_boxes() -> None:
+    report = build_foreign_trade_report(
+        [
+            {
+                "sku": "ST-351",
+                "name": "BRAND SUPER STARS ST-351",
+                "available_units": 0,
+                "average_daily_demand": 2,
+            }
+        ],
+        as_of=date(2026, 7, 31),
+    )
+
+    item = report["purchase_proposal"]["items"][0]
+    units_per_carton = int(item["units_per_carton"])
+    assert units_per_carton == 54
+    assert item["recommended_units"] % units_per_carton == 0
+    assert item["recommended_cartons"] == pytest.approx(
+        item["recommended_units"] / units_per_carton
+    )
+    assert report["purchase_proposal"]["total_cartons"] == pytest.approx(
+        item["recommended_cartons"]
     )
 
 

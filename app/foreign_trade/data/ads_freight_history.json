@@ -7,9 +7,9 @@
   "lane": "Ningbo - San Antonio",
   "container_policy": {
     "type": "20GP",
-    "planning_capacity_cbm": 28.0,
+    "planning_capacity_cbm": 27.0,
     "target_fill_percent": 90.0,
-    "basis": "Capacidad util de planificacion definida para las compras de Importadora Latin Chile"
+    "basis": "Capacidad util confirmada por el usuario para el contenedor 20GP facturado por ADS Cargas"
   },
   "selection_policy": "latest_verified_ocean_freight_invoice",
   "verified_ocean_freight": [
@@ -46,7 +46,8 @@
     "historical_average_usd": 2700.0
   },
   "notes": [
-    "El flete maritimo se toma de la factura ADS mas reciente verificada para un contenedor 20GP.",
+    "El flete maritimo se toma de la factura ADS mas reciente verificada para un contenedor 20GP completo de 27 m3 utiles.",
+    "Las propuestas parciales reconocen el flete en proporcion a los m3 utilizados y no cargan el contenedor completo.",
     "Emision de BL, apertura, DTHC y Gate In se conservan como cargos separados y no se mezclan con el flete maritimo."
   ]
 }

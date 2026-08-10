@@ -499,7 +499,7 @@ def _sum_costs(rows: list[dict[str, Any]]) -> dict[str, float]:
 def _consolidated_costs(
     rows: list[dict[str, Any]], *, rates: dict[str, Any], freight_history: dict[str, Any]
 ) -> dict[str, float]:
-    """Calcula la caja real de la orden, incluido el flete completo por contenedor 20GP."""
+    """Calcula la orden y prorratea el flete 20GP por el volumen utilizado."""
     row_totals = _sum_costs(rows)
     fob = _decimal(row_totals.get("fob_usd"))
     total_cbm = _decimal(row_totals.get("total_cbm"))
@@ -508,9 +508,8 @@ def _consolidated_costs(
 
     container_policy = freight_history.get("container_policy") or {}
     capacity = max(Decimal("1"), _decimal(container_policy.get("planning_capacity_cbm")))
-    container_count = max(1, int((total_cbm / capacity).to_integral_value(rounding=ROUND_UP)))
     latest_freight = _decimal((freight_history.get("summary") or {}).get("latest_verified_usd"))
-    freight = latest_freight * container_count
+    freight = latest_freight * total_cbm / capacity
     insurance = fob * _decimal(rates.get("insurance_percent_fob")) / 100
     cif = fob + freight + insurance
     duty = cif * _decimal(rates.get("customs_duty_percent_cif")) / 100
@@ -562,7 +561,18 @@ def build_foreign_trade_report(
         for item in active_import.get("items", [])
         if isinstance(item, dict)
     ]
-    rates = cost_model["derived_rates"]
+    container_policy = freight_history.get("container_policy") or {}
+    container_capacity_cbm = max(
+        Decimal("1"), _decimal(container_policy.get("planning_capacity_cbm"))
+    )
+    latest_container_freight = _decimal(
+        (freight_history.get("summary") or {}).get("latest_verified_usd")
+    )
+    rates = dict(cost_model["derived_rates"])
+    if latest_container_freight > 0:
+        rates["freight_usd_per_cbm"] = float(
+            latest_container_freight / container_capacity_cbm
+        )
     projected_arrival = planner.projected_arrival(as_of)
     demand_multiplier = Decimal("1.25") if projected_arrival.month in planner.high_season_months else Decimal("1")
     evaluated: list[dict[str, Any]] = []
@@ -618,6 +628,9 @@ def build_foreign_trade_report(
                 "coverage_days": round(coverage_days, 1) if coverage_days is not None else None,
                 "recommended_units": units,
                 "order_multiple": float(multiple),
+                "units_per_carton": float(multiple),
+                "recommended_cartons": _round(Decimal(units) / multiple),
+                "packing_box_source": item.get("source_document"),
                 "unit_fob_usd": float(unit_fob),
                 "unit_cbm": float(unit_cbm),
                 "costs": costs,
@@ -646,8 +659,6 @@ def build_foreign_trade_report(
     )
     selected: list[dict[str, Any]] = []
     remaining_budget = planner.hard_po_max_usd
-    container_policy = freight_history.get("container_policy") or {}
-    container_capacity_cbm = _decimal(container_policy.get("planning_capacity_cbm"))
     remaining_cbm = container_capacity_cbm
     for row in candidates:
         unit_fob = _decimal(row["unit_fob_usd"])
@@ -661,6 +672,7 @@ def build_foreign_trade_report(
             continue
         selected_row = dict(row)
         selected_row["recommended_units"] = units
+        selected_row["recommended_cartons"] = _round(Decimal(units) / multiple)
         selected_row["costs"] = _landed_cost(
             unit_fob=unit_fob, unit_cbm=unit_cbm, quantity=units, rates=rates
         )
@@ -716,6 +728,18 @@ def build_foreign_trade_report(
     remaining_container_cbm = max(
         Decimal("0"), container_capacity_cbm - _decimal(totals.get("total_cbm"))
     )
+    freight_proration_factor = (
+        _decimal(totals.get("total_cbm")) / container_capacity_cbm
+        if totals.get("total_cbm")
+        else Decimal("0")
+    )
+    if totals["total_cbm"]:
+        warnings.append(
+            f"El flete de referencia USD {_round(latest_container_freight)} corresponde al "
+            f"20GP completo de {_round(container_capacity_cbm)} m3. Esta propuesta usa "
+            f"{_round(freight_proration_factor * 100)}% de esa capacidad y reconoce solo "
+            f"USD {_round(_decimal(totals['freight_usd']))} de flete proporcional."
+        )
     if totals["total_cbm"] and utilization_percent < float(
         _decimal(container_policy.get("target_fill_percent"))
     ):
@@ -819,10 +843,29 @@ def build_foreign_trade_report(
             "container_reference_cbm": float(container_capacity_cbm),
             "container_utilization_percent": round(utilization_percent, 1),
             "container_remaining_cbm": _round(remaining_container_cbm, "0.01"),
-            "container_count": 1 if totals["total_cbm"] else 0,
+            "container_count": int(
+                (_decimal(totals.get("total_cbm")) / container_capacity_cbm).to_integral_value(
+                    rounding=ROUND_UP
+                )
+            )
+            if totals["total_cbm"]
+            else 0,
+            "container_equivalent": _round(freight_proration_factor, "0.0001"),
             "total_units": sum(int(row["recommended_units"]) for row in selected),
+            "total_cartons": _round(
+                sum(
+                    (_decimal(row.get("recommended_cartons")) for row in selected),
+                    Decimal("0"),
+                )
+            ),
             "total_skus": len(selected),
             "freight_reference": freight_history.get("summary", {}),
+            "freight_full_container_usd": _round(latest_container_freight),
+            "freight_proration_factor": _round(freight_proration_factor, "0.0001"),
+            "freight_usd_per_cbm": _round(
+                latest_container_freight / container_capacity_cbm, "0.0001"
+            ),
+            "freight_allocation_policy": "proportional_to_used_cbm",
             "required_order_date": min(
                 (row["required_order_date"] for row in selected if row["required_order_date"]),
                 default=None,
@@ -834,7 +877,10 @@ def build_foreign_trade_report(
             "Cruce exacto por SKU y, en segundo termino, similitud de nombre. La demanda proviene de ventas Facto; "
             "el volumen y FOB provienen de documentos Chinafore; el flete maritimo usa primero la factura mas "
             "reciente de AD/ADS Cargas almacenada en el CRM por Facto y solo recurre al historico verificado "
-            "cuando esa evidencia no permite una valorizacion USD auditable. Seguro, derechos, gastos locales "
+            "cuando esa evidencia no permite una valorizacion USD auditable. La tarifa del 20GP completo se "
+            "prorratea por los m3 efectivamente usados sobre una capacidad util de 27 m3. Las cantidades se "
+            "redondean a cajas completas usando Packing Box (unidades por caja) del catalogo Chinafore. "
+            "Seguro, derechos, gastos locales "
             "y honorarios usan como referencia historica las facturas y solicitudes de fondos fechadas de "
             "Agencia Rodriguez Palma encontradas en Gmail, con j.rodriguez@agenciarodriguezpalma.cl como "
             "contacto de referencia. Esos importes son variables por despacho y nunca se tratan como tarifas fijas. "
