@@ -269,6 +269,9 @@ class FinanceAgent(BusinessAgent):
             )
         purchases = Decimal(str(snapshot.get("net_purchases", 0)))
         purchase_documents = int(snapshot.get("purchase_document_count", 0))
+        internet_sales = snapshot.get("internet_sales", {})
+        internet_orders = int(internet_sales.get("document_count", 0))
+        internet_gross = Decimal(str(internet_sales.get("gross_sales", 0)))
         collections = snapshot.get("collections", {})
         observed_receivables = Decimal(str(collections.get("observed_amount", 0)))
         return AgentResult(
@@ -294,6 +297,11 @@ class FinanceAgent(BusinessAgent):
                         else ""
                     )
                 )
+                + (
+                    f" Climactiva.cl registra {internet_orders} pedidos pagados por CLP {internet_gross:.0f} bruto, identificados por Tiendanube."
+                    if internet_sales.get("available")
+                    else ""
+                )
             ),
             metrics={
                 "net_sales": float(revenue),
@@ -306,6 +314,8 @@ class FinanceAgent(BusinessAgent):
                 "reference_cost": float(reference_cost),
                 "reference_margin": float(reference_margin),
                 "reference_margin_percent": float(margin_pct),
+                "internet_paid_orders": internet_orders,
+                "internet_gross_sales": float(internet_gross),
                 "collections_observed": float(observed_receivables),
                 "collections_overdue": float(collections.get("overdue_amount", 0)),
             },

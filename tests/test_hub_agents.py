@@ -106,6 +106,11 @@ async def test_finance_agent_uses_facto_snapshot_and_marks_missing_sources() -> 
                     "average_net_ticket": 75000,
                     "reference_cost_of_sales": 60000,
                     "reference_margin_available": True,
+                    "internet_sales": {
+                        "available": True,
+                        "document_count": 3,
+                        "gross_sales": 357000,
+                    },
                     "receivables_available": False,
                     "expenses_available": False,
                 }
@@ -115,6 +120,9 @@ async def test_finance_agent_uses_facto_snapshot_and_marks_missing_sources() -> 
 
     assert result.metrics["net_sales"] == 150000
     assert result.metrics["reference_margin"] == 90000
+    assert result.metrics["internet_paid_orders"] == 3
+    assert result.metrics["internet_gross_sales"] == 357000
+    assert "Climactiva.cl registra 3 pedidos pagados" in result.summary
     assert len(result.warnings) == 3
     assert result.evidence[0]["financial_report"]["document_count"] == 2
 

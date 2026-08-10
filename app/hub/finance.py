@@ -1031,6 +1031,163 @@ def _purchase_net_amount(document: dict[str, Any]) -> Decimal:
     return _purchase_amounts(document)[0]
 
 
+def _date_value(value: Any) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _internet_sales_snapshot(
+    orders_payload: Any,
+    *,
+    available: bool,
+) -> dict[str, Any]:
+    """Summarize paid Climactiva.cl orders without adding them to Facto sales."""
+
+    orders = payload_rows(orders_payload, "orders", "data", "items")
+    by_day: dict[str, dict[str, Decimal | int]] = defaultdict(
+        lambda: {
+            "net_sales": Decimal("0"),
+            "tax": Decimal("0"),
+            "gross_sales": Decimal("0"),
+            "documents": 0,
+        }
+    )
+    excluded_cancelled = 0
+    excluded_unpaid = 0
+    excluded_without_date = 0
+    excluded_without_total = 0
+    excluded_non_clp = 0
+
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        payment = _nested_dict(
+            order,
+            "payment_details",
+            "payment",
+            "transaction",
+        )
+        status = str(
+            _first(order, "status", "order_status")
+            or _first(payment, "status", "order_status")
+            or ""
+        ).strip().casefold()
+        payment_status = str(
+            _first(order, "payment_status", "financial_status")
+            or _first(payment, "payment_status", "financial_status", "status")
+            or ""
+        ).strip().casefold()
+        cancelled_at = _first(
+            order,
+            "cancelled_at",
+            "canceled_at",
+            "cancel_date",
+        )
+        if (
+            cancelled_at
+            or status in {"cancelled", "canceled", "voided"}
+            or payment_status in {"cancelled", "canceled", "refunded", "voided"}
+        ):
+            excluded_cancelled += 1
+            continue
+
+        paid_at = _first(order, "paid_at", "payment_date") or _first(
+            payment,
+            "paid_at",
+            "payment_date",
+        )
+        if payment_status != "paid" and not paid_at:
+            excluded_unpaid += 1
+            continue
+
+        currency_value = _first(order, "currency", "currency_code") or _first(
+            payment,
+            "currency",
+            "currency_code",
+        )
+        if isinstance(currency_value, dict):
+            currency_value = _first(currency_value, "code", "iso", "id")
+        currency = str(currency_value or "CLP").strip().upper()
+        if currency not in {"CLP", "39"}:
+            excluded_non_clp += 1
+            continue
+
+        totals = _nested_dict(order, "totals", "amounts")
+        gross = _decimal(
+            _first(order, "total", "total_amount", "grand_total")
+            or _first(totals, "total", "total_amount", "grand_total")
+        )
+        if gross is None or gross < 0:
+            excluded_without_total += 1
+            continue
+
+        order_date = _date_value(
+            paid_at
+            or _first(order, "completed_at", "closed_at", "created_at", "date")
+        )
+        if not order_date:
+            excluded_without_date += 1
+            continue
+
+        net = gross / VAT_FACTOR
+        tax = gross - net
+        day = order_date.isoformat()
+        by_day[day]["net_sales"] += net
+        by_day[day]["tax"] += tax
+        by_day[day]["gross_sales"] += gross
+        by_day[day]["documents"] += 1
+
+    daily_rows = [
+        {
+            "date": day,
+            **{
+                key: float(value) if isinstance(value, Decimal) else value
+                for key, value in values.items()
+            },
+        }
+        for day, values in sorted(by_day.items())
+    ]
+    gross_sales = sum(
+        (Decimal(str(row["gross_sales"])) for row in daily_rows),
+        Decimal("0"),
+    )
+    net_sales = gross_sales / VAT_FACTOR
+    documents = sum(int(row["documents"]) for row in daily_rows)
+    return {
+        "available": available,
+        "source": "tiendanube_read_only",
+        "channel": "climactiva.cl",
+        "currency": "CLP",
+        "amount_basis": "paid_order_total_gross",
+        "net_tax_method": "gross_divided_by_1.19_reference",
+        "net_sales_is_estimated": True,
+        "period_start": daily_rows[0]["date"] if daily_rows else None,
+        "period_end": daily_rows[-1]["date"] if daily_rows else None,
+        "orders_reviewed": len(orders),
+        "document_count": documents,
+        "net_sales": float(net_sales),
+        "tax": float(gross_sales - net_sales),
+        "gross_sales": float(gross_sales),
+        "sales_by_day": daily_rows,
+        "excluded": {
+            "cancelled_or_refunded": excluded_cancelled,
+            "unpaid": excluded_unpaid,
+            "without_date": excluded_without_date,
+            "without_total": excluded_without_total,
+            "non_clp": excluded_non_clp,
+        },
+        "disclaimer": (
+            "Solo pedidos pagados de Climactiva.cl. El total bruto proviene de "
+            "Tiendanube; neto e IVA son una referencia calculada con factor 1,19 "
+            "y no duplican ni reemplazan los documentos tributarios de Facto."
+        ),
+    }
+
+
 def _annual_comparison(
     dated_amounts: list[tuple[date, Decimal]],
     dated_purchases: list[tuple[date, Decimal]] | None = None,
@@ -1146,6 +1303,8 @@ def extract_financial_snapshot(
     purchase_documents_payload: Any | None = None,
     payments_payload: Any | None = None,
     receivables_payload: Any | None = None,
+    tiendanube_orders_payload: Any | None = None,
+    internet_channel_available: bool = False,
 ) -> list[dict[str, Any]]:
     """Create one auditable rolling financial summary from issued Facto documents.
 
@@ -1160,6 +1319,9 @@ def extract_financial_snapshot(
     monthly: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {"net_sales": Decimal("0"), "tax": Decimal("0"), "gross_sales": Decimal("0"), "documents": 0}
     )
+    sales_by_day: dict[str, dict[str, Decimal | int]] = defaultdict(
+        lambda: {"net_sales": Decimal("0"), "tax": Decimal("0"), "gross_sales": Decimal("0"), "documents": 0}
+    )
     customers: dict[str, dict[str, Any]] = {}
     document_types: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {"net_sales": Decimal("0"), "documents": 0}
@@ -1170,6 +1332,14 @@ def extract_financial_snapshot(
     tax = Decimal("0")
     gross_sales = Decimal("0")
     purchases_by_month: dict[str, dict[str, Decimal | int]] = defaultdict(
+        lambda: {
+            "net_purchases": Decimal("0"),
+            "tax": Decimal("0"),
+            "gross_purchases": Decimal("0"),
+            "documents": 0,
+        }
+    )
+    purchases_by_day: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {
             "net_purchases": Decimal("0"),
             "tax": Decimal("0"),
@@ -1200,6 +1370,12 @@ def extract_financial_snapshot(
         monthly[month]["tax"] += document_tax
         monthly[month]["gross_sales"] += gross
         monthly[month]["documents"] += 1
+        if issued:
+            day = issued.isoformat()
+            sales_by_day[day]["net_sales"] += net
+            sales_by_day[day]["tax"] += document_tax
+            sales_by_day[day]["gross_sales"] += gross
+            sales_by_day[day]["documents"] += 1
         document_type = str(_document_type_id(document) or "otro")
         document_types[document_type]["net_sales"] += net
         document_types[document_type]["documents"] += 1
@@ -1239,6 +1415,7 @@ def extract_financial_snapshot(
                 "net_purchases": Decimal("0"),
                 "documents": 0,
                 "years": defaultdict(lambda: {"net_purchases": Decimal("0"), "documents": 0}),
+                "days": defaultdict(lambda: {"net_purchases": Decimal("0"), "documents": 0}),
             },
         )
         supplier["net_purchases"] += net
@@ -1246,6 +1423,13 @@ def extract_financial_snapshot(
         if issued:
             supplier["years"][str(issued.year)]["net_purchases"] += net
             supplier["years"][str(issued.year)]["documents"] += 1
+            day = issued.isoformat()
+            purchases_by_day[day]["net_purchases"] += net
+            purchases_by_day[day]["tax"] += document_tax
+            purchases_by_day[day]["gross_purchases"] += gross
+            purchases_by_day[day]["documents"] += 1
+            supplier["days"][day]["net_purchases"] += net
+            supplier["days"][day]["documents"] += 1
 
     products: list[dict[str, Any]] = []
     reference_cost = Decimal("0")
@@ -1275,6 +1459,21 @@ def extract_financial_snapshot(
     )
     document_count = len(documents)
     comparison_cutoff = generated_on or (max(dates) if dates else date.today())
+    facto_period_start = min(dates).isoformat() if dates else None
+    facto_period_end = max(dates).isoformat() if dates else None
+    internet_sales = _internet_sales_snapshot(
+        tiendanube_orders_payload,
+        available=internet_channel_available,
+    )
+    observed_dates = list(dates)
+    observed_dates.extend(
+        parsed
+        for parsed in (
+            _date_value(internet_sales.get("period_start")),
+            _date_value(internet_sales.get("period_end")),
+        )
+        if parsed
+    )
     collections = _collections_snapshot(
         documents,
         payments_payload=payments_payload,
@@ -1283,8 +1482,10 @@ def extract_financial_snapshot(
     )
     snapshot = {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "period_start": min(dates).isoformat() if dates else None,
-        "period_end": max(dates).isoformat() if dates else None,
+        "period_start": min(observed_dates).isoformat() if observed_dates else None,
+        "period_end": max(observed_dates).isoformat() if observed_dates else None,
+        "facto_period_start": facto_period_start,
+        "facto_period_end": facto_period_end,
         "document_count": document_count,
         "net_sales": float(net_sales),
         "tax": float(tax),
@@ -1301,6 +1502,16 @@ def extract_financial_snapshot(
             {"month": month, **{key: float(value) if isinstance(value, Decimal) else value for key, value in values.items()}}
             for month, values in sorted(monthly.items())
         ],
+        "sales_by_day": [
+            {
+                "date": day,
+                **{
+                    key: float(value) if isinstance(value, Decimal) else value
+                    for key, value in values.items()
+                },
+            }
+            for day, values in sorted(sales_by_day.items())
+        ],
         "purchases_by_month": [
             {
                 "month": month,
@@ -1310,6 +1521,16 @@ def extract_financial_snapshot(
                 },
             }
             for month, values in sorted(purchases_by_month.items())
+        ],
+        "purchases_by_day": [
+            {
+                "date": day,
+                **{
+                    key: float(value) if isinstance(value, Decimal) else value
+                    for key, value in values.items()
+                },
+            }
+            for day, values in sorted(purchases_by_day.items())
         ],
         "year_comparison": _annual_comparison(
             dated_amounts,
@@ -1339,12 +1560,20 @@ def extract_financial_snapshot(
                     }
                     for year, values in sorted(item["years"].items())
                 },
+                "days": {
+                    day: {
+                        "net_purchases": float(values["net_purchases"]),
+                        "documents": values["documents"],
+                    }
+                    for day, values in sorted(item["days"].items())
+                },
             }
             for item in top_suppliers
         ],
         "supplier_count": len(top_suppliers),
         "purchases_available": bool(purchase_documents),
         "top_products": products[:30],
+        "internet_sales": internet_sales,
         "collections": collections,
         "receivables_available": collections["authoritative"],
         "credit_exposure_available": False,

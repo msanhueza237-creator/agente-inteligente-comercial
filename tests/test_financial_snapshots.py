@@ -65,6 +65,104 @@ def test_financial_snapshot_derives_net_from_taxed_gross_only() -> None:
     assert report["receivables_available"] is False
 
 
+def test_financial_snapshot_exposes_daily_totals_for_exact_date_filters() -> None:
+    report = extract_financial_snapshot(
+        [
+            {
+                "document_type_id": 2,
+                "issue_date": "2026-07-01",
+                "net_amount": 100000,
+                "tax_amount": 19000,
+                "total_amount": 119000,
+            },
+            {
+                "document_type_id": 2,
+                "issue_date": "2026-07-03",
+                "net_amount": 200000,
+                "tax_amount": 38000,
+                "total_amount": 238000,
+            },
+        ],
+        purchase_documents_payload=[
+            {
+                "document_type_id": 9,
+                "issue_date": "2026-07-02",
+                "net_amount": 50000,
+                "tax_amount": 9500,
+                "total_amount": 59500,
+                "issuer_legal_name": "Proveedor Web",
+                "issuer_tax_id_code": "76.555.555-5",
+            }
+        ],
+    )[0]["payload"]
+
+    assert report["sales_by_day"] == [
+        {
+            "date": "2026-07-01",
+            "net_sales": 100000.0,
+            "tax": 19000.0,
+            "gross_sales": 119000.0,
+            "documents": 1,
+        },
+        {
+            "date": "2026-07-03",
+            "net_sales": 200000.0,
+            "tax": 38000.0,
+            "gross_sales": 238000.0,
+            "documents": 1,
+        },
+    ]
+    assert report["purchases_by_day"][0]["date"] == "2026-07-02"
+    assert report["top_suppliers"][0]["days"]["2026-07-02"] == {
+        "net_purchases": 50000.0,
+        "documents": 1,
+    }
+
+
+def test_financial_snapshot_exposes_only_paid_climactiva_orders() -> None:
+    report = extract_financial_snapshot(
+        [],
+        tiendanube_orders_payload=[
+            {
+                "id": 1,
+                "payment_status": "paid",
+                "paid_at": "2026-08-01T13:30:00Z",
+                "currency": "CLP",
+                "total": "119000.00",
+            },
+            {
+                "id": 2,
+                "payment_status": "pending",
+                "created_at": "2026-08-01T14:00:00Z",
+                "currency": "CLP",
+                "total": "238000.00",
+            },
+            {
+                "id": 3,
+                "payment_status": "paid",
+                "paid_at": "2026-08-02T10:00:00Z",
+                "cancelled_at": "2026-08-03T10:00:00Z",
+                "currency": "CLP",
+                "total": "357000.00",
+            },
+        ],
+        internet_channel_available=True,
+    )[0]["payload"]
+
+    internet = report["internet_sales"]
+    assert internet["available"] is True
+    assert internet["channel"] == "climactiva.cl"
+    assert internet["orders_reviewed"] == 3
+    assert internet["document_count"] == 1
+    assert internet["gross_sales"] == 119000.0
+    assert round(internet["net_sales"]) == 100000
+    assert internet["sales_by_day"][0]["date"] == "2026-08-01"
+    assert internet["excluded"]["unpaid"] == 1
+    assert internet["excluded"]["cancelled_or_refunded"] == 1
+    assert report["period_start"] == "2026-08-01"
+    assert report["period_end"] == "2026-08-01"
+
+
 def test_financial_snapshot_reads_flat_facto_receiver_fields() -> None:
     rows = extract_financial_snapshot(
         [

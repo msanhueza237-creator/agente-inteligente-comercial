@@ -190,6 +190,12 @@ async def integration_monitor(crm: HubCRMPort) -> None:
         tiendanube_orders: list[dict] = []
         facto_commercial_ready = not settings.facto_enabled
         tiendanube_commercial_ready = not settings.tiendanube_enabled
+        facto_financial_ready = False
+        snapshot_documents: list[dict] = []
+        snapshot_purchase_documents: list[dict] = []
+        financial_product_snapshots: list[dict] = []
+        raw_payments: list[dict] | None = None
+        raw_receivables: list[dict] | None = None
         for provider, client, enabled in (
             ("facto", FactoClient(settings), settings.facto_enabled),
             ("tiendanube", TiendanubeClient(settings), settings.tiendanube_enabled),
@@ -229,6 +235,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                     # read only and are used only to calculate an auditable
                     # sales-rate snapshot for the foreign-trade agent.
                     if provider == "facto":
+                        facto_financial_ready = True
                         try:
                             facto_customers = await load_paginated_records(
                                 client.customers,
@@ -384,18 +391,7 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                             resource="inventory_snapshots",
                             records=snapshots,
                         )
-                        financial_snapshots = extract_financial_snapshot(
-                            snapshot_documents,
-                            snapshots,
-                            purchase_documents_payload=snapshot_purchase_documents,
-                            payments_payload=raw_payments,
-                            receivables_payload=raw_receivables,
-                        )
-                        await crm.upsert_integration_records(
-                            provider="facto",
-                            resource="financial_snapshots",
-                            records=financial_snapshots,
-                        )
+                        financial_product_snapshots = snapshots
                     else:
                         try:
                             tiendanube_customers = await load_paginated_records(
@@ -424,6 +420,28 @@ async def integration_monitor(crm: HubCRMPort) -> None:
                             )
             except Exception:  # noqa: BLE001
                 logger.exception("integration status failed provider=%s", provider)
+        if facto_financial_ready:
+            try:
+                financial_snapshots = extract_financial_snapshot(
+                    snapshot_documents,
+                    financial_product_snapshots,
+                    purchase_documents_payload=snapshot_purchase_documents,
+                    payments_payload=raw_payments,
+                    receivables_payload=raw_receivables,
+                    tiendanube_orders_payload=tiendanube_orders,
+                    internet_channel_available=(
+                        settings.tiendanube_enabled and tiendanube_commercial_ready
+                    ),
+                )
+                await crm.upsert_integration_records(
+                    provider="facto",
+                    resource="financial_snapshots",
+                    records=financial_snapshots,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Facto financial snapshot could not be synchronized"
+                )
         facto_commercial_available = settings.facto_enabled and facto_commercial_ready
         tiendanube_commercial_available = (
             settings.tiendanube_enabled and tiendanube_commercial_ready
