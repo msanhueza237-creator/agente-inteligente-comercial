@@ -495,6 +495,8 @@ async def load_facto_details(
     """Read full Facto records required for stock and auditable sales demand."""
 
     semaphore = asyncio.Semaphore(max(1, concurrency))
+    product_semaphore = asyncio.Semaphore(max(1, min(2, concurrency)))
+    product_retry_until = 0.0
 
     def record_id(row: dict, *, kind: str) -> object | None:
         """Read IDs from Facto list rows, including their ``header`` envelope."""
@@ -554,17 +556,34 @@ async def load_facto_details(
         return merged
 
     async def product_detail(row: dict) -> dict:
+        nonlocal product_retry_until
         product_id = record_id(row, kind="product")
         if product_id is None:
             return row
-        async with semaphore:
-            try:
-                detail = await client.product(product_id)
-            except Exception:  # noqa: BLE001
-                logger.warning("Facto product detail unavailable id=%s", product_id)
-                return row
-        detail_record = unwrap_detail(detail, kind="product")
-        return merge_detail(row, detail_record) if detail_record else row
+        # Avoid bursts across the full catalog; never attach another product's detail.
+        async with product_semaphore:
+            for attempt in range(4):
+                try:
+                    remaining = product_retry_until - time.monotonic()
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                    detail = await client.product(product_id)
+                    detail_record = unwrap_detail(detail, kind="product")
+                    if not detail_record or str(record_id(detail_record, kind="product")) != str(product_id):
+                        raise ValueError("Facto product identity mismatch")
+                    await asyncio.sleep(0.25)
+                    return merge_detail(row, detail_record)
+                except Exception as exc:  # noqa: BLE001
+                    status = getattr(exc, "status_code", None)
+                    if attempt == 3 or (status and 400 <= status < 500 and status not in (401, 408, 429)):
+                        logger.warning("Facto product detail unavailable after retries id=%s", product_id)
+                        break
+                    if status == 429:
+                        delay = getattr(exc, "retry_after", None) or 30
+                        product_retry_until = max(product_retry_until, time.monotonic() + delay)
+                    else:
+                        await asyncio.sleep((1, 3, 5)[attempt])
+        return row
 
     async def document_detail(row: dict) -> dict:
         document_id = record_id(row, kind="document")

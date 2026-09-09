@@ -12,6 +12,11 @@ from app.config import Settings
 class FactoError(RuntimeError):
     """Safe integration error that never includes credentials or response bodies."""
 
+    def __init__(self, message: str, *, status_code: int | None = None, retry_after: float | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
 
 @dataclass(frozen=True)
 class FactoHealth:
@@ -105,7 +110,16 @@ class FactoClient:
             self._access_token = None
             raise FactoError("La sesion de Facto expiro")
         if response.status_code >= 400:
-            raise FactoError(f"Facto devolvio un error ({response.status_code})")
+            try:
+                delay = float(response.headers.get("Retry-After", ""))
+                retry_after = delay if 0 <= delay <= 300 else None
+            except ValueError:
+                retry_after = None
+            raise FactoError(
+                f"Facto devolvio un error ({response.status_code})",
+                status_code=response.status_code,
+                retry_after=retry_after,
+            )
         return response.json()
 
     async def products(self, *, page: int = 1) -> Any:
