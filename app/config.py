@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -72,6 +73,15 @@ class Settings(BaseSettings):
     crm_worker_id: str = "climactiva-worker-01"
     crm_timeout_seconds: float = 15.0
 
+    # Browser import preview: validate CRM sessions remotely, never a shared browser secret.
+    import_supabase_url: str = ""
+    import_supabase_anon_key: SecretStr | None = None
+    import_allowed_origins: str = ""
+
+    @property
+    def historical_import_origins(self) -> list[str]:
+        return [value.strip() for value in self.import_allowed_origins.split(",") if value.strip()]
+
     # Compatibility flags only. The connector is hard-disabled in code until
     # an authorized official API/feed implementation replaces the placeholder.
     paginas_amarillas_enabled: bool = False
@@ -106,6 +116,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def production_crm_contract(self) -> "Settings":
+        for value in [self.import_supabase_url, *self.historical_import_origins]:
+            if not value:
+                continue
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme != "https" or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment
+                or parsed.path not in {"", "/"} or "*" in value
+            ):
+                raise ValueError("Historical import URLs must be explicit HTTPS origins")
+        self.import_supabase_url = self.import_supabase_url.rstrip("/")
+        if any(value.endswith("/") for value in self.historical_import_origins):
+            raise ValueError("IMPORT_ALLOWED_ORIGINS must not include a trailing slash")
         if self.env == "production" and self.crm_mode != "http":
             raise ValueError("CRM_MODE=http is mandatory in production")
         if self.crm_mode == "http":

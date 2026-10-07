@@ -48,12 +48,15 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Clima Activa - Agente de Inteligencia Comercial", lifespan=lifespan)
+import_origins = settings.historical_import_origins
 if settings.env in {"development", "test", "testing"}:
+    import_origins = [*import_origins, "http://localhost:5173", "http://127.0.0.1:5173"]
+if import_origins:
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=import_origins,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Authorization"],
     )
 
 app.mount(
