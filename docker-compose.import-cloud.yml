@@ -1,0 +1,44 @@
+# Select this file in the existing Dokploy Compose resource, never a new project.
+# Required command: compose -p crm-climactiva-agente-inteligente-comercial-amxo4p -f docker-compose.import-cloud.yml up -d --no-deps --no-build --pull never app
+# Build and validate the immutable image separately BEFORE replacing app.
+# Do not add --remove-orphans: the existing workers and database are intentional.
+services:
+  app:
+    image: ${HISTORICAL_IMPORT_APP_IMAGE:?Verified immutable app image required}
+    pull_policy: never
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      HUB_EMBEDDED_WORKER: "false"
+      IMPORT_SUPABASE_URL: ${IMPORT_SUPABASE_URL:?Supabase HTTPS origin required}
+      IMPORT_SUPABASE_ANON_KEY: ${IMPORT_SUPABASE_ANON_KEY:?Public anon key required}
+      IMPORT_ALLOWED_ORIGINS: https://crm.latinchile.cl
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - default
+      - dokploy-network
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: dokploy-network
+      traefik.http.routers.climactiva-import-preview.rule: "Host(`importaciones.latinchile.cl`) && Path(`/api/historical-imports/preview`) && (Method(`POST`) || Method(`OPTIONS`))"
+      traefik.http.routers.climactiva-import-preview.entrypoints: websecure
+      traefik.http.routers.climactiva-import-preview.tls.certresolver: letsencrypt
+      traefik.http.routers.climactiva-import-preview.service: climactiva-import-preview
+      traefik.http.routers.climactiva-import-preview.middlewares: climactiva-import-rate,climactiva-import-size
+      traefik.http.services.climactiva-import-preview.loadbalancer.server.port: "8000"
+      traefik.http.services.climactiva-import-preview.loadbalancer.serverstransport: climactiva-import-timeout@file
+      traefik.http.middlewares.climactiva-import-rate.ratelimit.average: "6"
+      traefik.http.middlewares.climactiva-import-rate.ratelimit.period: 1m
+      traefik.http.middlewares.climactiva-import-rate.ratelimit.burst: "3"
+      traefik.http.middlewares.climactiva-import-size.buffering.maxRequestBodyBytes: "27262976"
+      traefik.http.middlewares.climactiva-import-size.buffering.memRequestBodyBytes: "1048576"
+    restart: unless-stopped
+
+networks:
+  default:
+    external: true
+    name: crm-climactiva-agente-inteligente-comercial-amxo4p_default
+  dokploy-network:
+    external: true

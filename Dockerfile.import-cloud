@@ -1,0 +1,12 @@
+ARG HISTORICAL_IMPORT_BASE_IMAGE
+FROM ${HISTORICAL_IMPORT_BASE_IMAGE}
+
+# Preserve the verified production runtime and all unrelated integrations.
+COPY --chown=app:app app/config.py app/main.py /app/app/
+COPY --chown=app:app app/web/import_auth.py app/web/routes_import.py /app/app/web/
+
+USER app
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

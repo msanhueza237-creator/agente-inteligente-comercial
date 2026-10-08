@@ -1,0 +1,8 @@
+# Proposed dedicated dynamic file; install only after operational approval.
+http:
+  serversTransports:
+    climactiva-import-timeout:
+      forwardingTimeouts:
+        dialTimeout: 5s
+        responseHeaderTimeout: 60s
+        idleConnTimeout: 60s

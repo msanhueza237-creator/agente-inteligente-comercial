@@ -1,0 +1,8 @@
+**
+!Dockerfile.import-cloud
+!app/
+!app/config.py
+!app/main.py
+!app/web/
+!app/web/import_auth.py
+!app/web/routes_import.py
